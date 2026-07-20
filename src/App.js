@@ -158,6 +158,7 @@ const App = () => {
           </div>
         </div>
 
+        {}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Left Column: Indicators */}
           <div className="lg:col-span-2 space-y-6">
@@ -366,6 +367,7 @@ const App = () => {
             </div>
           </div>
 
+          {}
           {/* Right Column: Simulation Controls (The "Sand table") */}
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 h-fit">
             <h3 className="text-lg font-bold text-white mb-6 border-b border-slate-700 pb-2 flex items-center">
