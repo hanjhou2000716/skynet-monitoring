@@ -28,7 +28,6 @@ const App = () => {
   const [lastUpdated, setLastUpdated] = useState("");
   const [dataState, setDataState] = useState("loading");
   const [dataError, setDataError] = useState("");
-  const [portfolio, setPortfolio] = useState(null);
 
   const fetchLatestData = () => {
     setIsFetching(true);
@@ -47,7 +46,6 @@ const App = () => {
         setPeak006208(json.peak_006208);
         setCurrent006208(json.asset_006208);
         setLastUpdated(json.lastUpdated);
-        setPortfolio(json.portfolio || null);
         setIsLoaded(true);
         setDataState(json.status === "degraded" ? "degraded" : "ready");
         setIsFetching(false);
@@ -183,7 +181,8 @@ const App = () => {
           </div>
         </div>
 
-        {portfolio && (
+        {/* Portfolio context intentionally lives in the Growth Dashboard. */}
+        {/*
           <section className="p-5 rounded-sm border border-slate-800 bg-slate-900" aria-labelledby="portfolio-summary">
             <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-3 mb-4">
               <div>
@@ -217,7 +216,7 @@ const App = () => {
               </div>
             )}
           </section>
-        )}
+        */}
 
         {}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
