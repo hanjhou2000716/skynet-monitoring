@@ -6,5 +6,18 @@
   "asset_006208": 0,
   "lastUpdated": "尚未完成首次同步",
   "status": "degraded",
-  "generatedAt": null
+  "generatedAt": null,
+  "portfolio": {
+    "totalAsset": 0,
+    "netAsset": 0,
+    "totalDebt": 0,
+    "allocation": [],
+    "risk": {
+      "level": "stable",
+      "debtRatio": 0,
+      "maintenanceRatio": 0,
+      "tsmcExposureRatio": 0,
+      "effectiveLeverage": 0
+    }
+  }
 }

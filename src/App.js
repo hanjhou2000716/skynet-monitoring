@@ -28,6 +28,7 @@ const App = () => {
   const [lastUpdated, setLastUpdated] = useState("");
   const [dataState, setDataState] = useState("loading");
   const [dataError, setDataError] = useState("");
+  const [portfolio, setPortfolio] = useState(null);
 
   const fetchLatestData = () => {
     setIsFetching(true);
@@ -46,6 +47,7 @@ const App = () => {
         setPeak006208(json.peak_006208);
         setCurrent006208(json.asset_006208);
         setLastUpdated(json.lastUpdated);
+        setPortfolio(json.portfolio || null);
         setIsLoaded(true);
         setDataState(json.status === "degraded" ? "degraded" : "ready");
         setIsFetching(false);
@@ -180,6 +182,35 @@ const App = () => {
             </div>
           </div>
         </div>
+
+        {portfolio && (
+          <section className="p-5 rounded-sm border border-slate-800 bg-slate-900" aria-labelledby="portfolio-summary">
+            <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-3 mb-4">
+              <div>
+                <p className="text-xs uppercase tracking-[0.16em] text-slate-500">Portfolio context</p>
+                <h2 id="portfolio-summary" className="text-lg font-semibold text-white">資產配置與槓桿脈絡</h2>
+              </div>
+              <span className={`text-xs px-3 py-1 border ${portfolio.risk.level === "attention" ? "text-red-400 border-red-500/50" : portfolio.risk.level === "watch" ? "text-amber-400 border-amber-500/50" : "text-emerald-400 border-emerald-500/50"}`}>
+                {portfolio.risk.level === "attention" ? "需處理" : portfolio.risk.level === "watch" ? "持續觀察" : "結構穩定"}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+              {portfolio.allocation.map((item) => (
+                <div key={item.label} className="bg-slate-950 border border-slate-800 p-3">
+                  <div className="text-xs text-slate-500">{item.label}</div>
+                  <div className="text-xl font-mono text-slate-200 mt-1">{item.percent}%</div>
+                  <div className="mt-2 h-1 bg-slate-800"><div className="h-1" style={{ width: `${Math.min(item.percent, 100)}%`, backgroundColor: item.color }} /></div>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              <div><span className="block text-slate-500 text-xs">負債比</span>{portfolio.risk.debtRatio}%</div>
+              <div><span className="block text-slate-500 text-xs">維持率</span>{portfolio.risk.maintenanceRatio || "—"}%</div>
+              <div><span className="block text-slate-500 text-xs">TSMC 曝險</span>{portfolio.risk.tsmcExposureRatio}%</div>
+              <div><span className="block text-slate-500 text-xs">有效槓桿</span>{portfolio.risk.effectiveLeverage}×</div>
+            </div>
+          </section>
+        )}
 
         {}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
