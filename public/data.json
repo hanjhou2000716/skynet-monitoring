@@ -17,6 +17,7 @@
       "debtRatio": 0,
       "maintenanceRatio": 0,
       "tsmcExposureRatio": 0,
+      "nvdaExposureRatio": 0,
       "effectiveLeverage": 0,
       "largestPosition": {
         "symbol": "—",
@@ -25,6 +26,8 @@
         "status": "正常"
       }
     },
-    "stressTests": []
+    "stressTests": [],
+    "categoryDailyChanges": {},
+    "nvdaExposure": {"value": 0, "percent": 0, "etfWeights": {}}
   }
 }

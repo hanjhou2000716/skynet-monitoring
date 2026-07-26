@@ -18,6 +18,20 @@ GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
 
 
+HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund_Value", "NVDA_QQQM_Weight", "NVDA_SPYG_Weight", "NVDA_VOO_Weight"]
+ETF_NVDA_WEIGHT_FALLBACKS = {"QQQM": 0.095, "SPYG": 0.075, "VOO": 0.070}
+
+
+def ensure_history_columns(history_sheet):
+    if history_sheet is None:
+        return
+    header = history_sheet.row_values(1)
+    for column in HISTORY_EXTRA_COLUMNS:
+        if column not in header:
+            history_sheet.update_cell(1, len(header) + 1, column)
+            header.append(column)
+
+
 def upsert_history_snapshot(history_sheet, snapshot_date, values):
     """Keep one end-of-day snapshot per Taiwan calendar date."""
     if history_sheet is None:
@@ -28,11 +42,34 @@ def upsert_history_snapshot(history_sheet, snapshot_date, values):
     for row_number in range(len(rows), 1, -1):
         row = rows[row_number - 1]
         if row and str(row[0]).strip()[:10] == snapshot_date:
-            history_sheet.update(f"A{row_number}:E{row_number}", [snapshot])
+            history_sheet.update(f"A{row_number}:{chr(64 + len(snapshot))}{row_number}", [snapshot])
             return "updated"
 
     history_sheet.append_row(snapshot)
     return "created"
+
+
+def get_etf_nvda_weight(symbol, history_records):
+    try:
+        holdings = yf.Ticker(symbol).funds_data.top_holdings
+        for index, row in holdings.iterrows():
+            text = f"{index} {' '.join(str(value) for value in row.values)}".upper()
+            if "NVDA" in text or "NVIDIA" in text:
+                value = next((float(item) for item in row.values if isinstance(item, (float, int)) and 0 < float(item) < 1), None)
+                if value is not None:
+                    return value, "official"
+    except Exception:
+        pass
+
+    field = f"NVDA_{symbol}_Weight"
+    for row in reversed(history_records):
+        try:
+            value = float(str(row.get(field, "")).replace("%", ""))
+            if value > 0:
+                return value, "history"
+        except (TypeError, ValueError):
+            pass
+    return ETF_NVDA_WEIGHT_FALLBACKS[symbol], "fallback"
 
 
 def write_json(path, payload):
@@ -199,6 +236,7 @@ def main():
     if history_sheet:
         try: history_records = history_sheet.get_all_records()
         except: pass
+    etf_nvda_weights = {symbol: get_etf_nvda_weight(symbol, history_records) for symbol in ETF_NVDA_WEIGHT_FALLBACKS}
         
     usd_rate = get_usd_twd_rate()
     tw_stock_value, us_stock_value_usd, tsmc_exposure_twd, price_006208, leveraged_etf_value = 0, 0, 0, 0, 0
@@ -269,6 +307,8 @@ def main():
 
     tw_free_value = max(0, tw_stock_value - total_debt)
     tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
+    nvda_exposure_twd = position_values_twd.get("NVDA", 0) + sum(position_values_twd.get(symbol, 0) * weight for symbol, (weight, _) in etf_nvda_weights.items())
+    nvda_pct = (nvda_exposure_twd / total_asset * 100) if total_asset > 0 else 0
     largest_symbol, largest_position_value = max(position_values_twd.items(), key=lambda item: item[1], default=("—", 0))
     largest_position_pct = (largest_position_value / total_asset * 100) if total_asset > 0 else 0
     largest_position_status = "警示" if largest_position_pct >= 35 else "觀察" if largest_position_pct >= 20 else "正常"
@@ -295,13 +335,24 @@ def main():
     bar_blocks = max(0, min(10, int(progress_pct / 10)))
     bar_str = "[" + "█" * bar_blocks + "░" * (10 - bar_blocks) + f"] {progress_pct:.1f}%"
 
+    category_values = {"TW_Stock_Value": tw_stock_value, "US_Stock_Value": us_stock_value_twd, "Cash_Value": total_cash_twd, "Fund_Value": fund_value}
+    previous_categories = next((row for row in reversed(history_records) if any(str(row.get(key, "")).strip() for key in category_values)), None)
+    category_daily_changes = {}
+    for key, value in category_values.items():
+        try:
+            previous = float(str(previous_categories.get(key, "")).replace(",", "")) if previous_categories else None
+        except (TypeError, ValueError):
+            previous = None
+        category_daily_changes[key] = None if previous is None else {"amount": round(value - previous, 2), "percent": round((value - previous) / previous * 100, 2) if previous else 0}
+
     snapshot_result = "skipped"
     if total_asset > 0:
         try:
+            ensure_history_columns(history_sheet)
             snapshot_result = upsert_history_snapshot(
                 history_sheet,
                 tw_now.strftime("%Y-%m-%d"),
-                [round(total_asset, 2), round(net_asset, 2), round(total_debt, 2), round(tsmc_exposure_twd, 2)],
+                [round(total_asset, 2), round(net_asset, 2), round(total_debt, 2), round(tsmc_exposure_twd, 2), round(tw_stock_value, 2), round(us_stock_value_twd, 2), round(total_cash_twd, 2), round(fund_value, 2), *[round(etf_nvda_weights[symbol][0], 6) for symbol in ETF_NVDA_WEIGHT_FALLBACKS]],
             )
         except Exception as error:
             print(f"History snapshot update failed: {error}")
@@ -350,6 +401,7 @@ def main():
         "tsmcExposureRatio": round(tsmc_pct, 1),
         "effectiveLeverage": round(effective_leverage, 2),
         "largestPosition": {"symbol": largest_symbol, "value": round(largest_position_value, 2), "percent": round(largest_position_pct, 1), "status": largest_position_status},
+        "nvdaExposureRatio": round(nvda_pct, 1),
     }
 
     data_for_web = {
@@ -366,6 +418,8 @@ def main():
             "allocation": allocation_items,
             "risk": risk_summary,
             "stressTests": stress_scenarios,
+            "categoryDailyChanges": category_daily_changes,
+            "nvdaExposure": {"value": round(nvda_exposure_twd, 2), "percent": round(nvda_pct, 1), "etfWeights": {symbol: {"weight": round(weight * 100, 2), "source": source} for symbol, (weight, source) in etf_nvda_weights.items()}},
         },
     }
 
