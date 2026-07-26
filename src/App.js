@@ -209,6 +209,31 @@ const App = () => {
               <div><span className="block text-slate-500 text-xs">TSMC 曝險</span>{portfolio.risk.tsmcExposureRatio}%</div>
               <div><span className="block text-slate-500 text-xs">有效槓桿</span>{portfolio.risk.effectiveLeverage}×</div>
             </div>
+            {portfolio.risk.largestPosition && (
+              <div className="mt-5 pt-4 border-t border-slate-800 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                <div>
+                  <span className="block text-slate-500 text-xs">最大單一標的曝險</span>
+                  <span className="text-base text-slate-200">{portfolio.risk.largestPosition.symbol} · {portfolio.risk.largestPosition.percent}%</span>
+                </div>
+                <span className={`text-xs px-3 py-1 border ${portfolio.risk.largestPosition.status === "警示" ? "text-red-400 border-red-500/50" : portfolio.risk.largestPosition.status === "觀察" ? "text-amber-400 border-amber-500/50" : "text-emerald-400 border-emerald-500/50"}`}>
+                  {portfolio.risk.largestPosition.status} · 20% 觀察 / 35% 警示
+                </span>
+              </div>
+            )}
+            {portfolio.stressTests?.length > 0 && (
+              <div className="mt-5 pt-4 border-t border-slate-800">
+                <p className="text-xs uppercase tracking-[0.16em] text-slate-500 mb-3">Stress test · net asset impact</p>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  {portfolio.stressTests.map((scenario) => (
+                    <div key={scenario.label} className="bg-slate-950 border border-slate-800 p-3">
+                      <div className="text-xs text-slate-500">{scenario.label}</div>
+                      <div className="font-mono text-red-400 mt-1">${Math.round(scenario.netImpact).toLocaleString()}</div>
+                      <div className="text-xs text-slate-500 mt-2">{scenario.maintenance === null ? "不影響維持率" : `維持率 ${scenario.maintenance.toFixed(1)}%`}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </section>
         )}
 

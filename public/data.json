@@ -17,7 +17,14 @@
       "debtRatio": 0,
       "maintenanceRatio": 0,
       "tsmcExposureRatio": 0,
-      "effectiveLeverage": 0
-    }
+      "effectiveLeverage": 0,
+      "largestPosition": {
+        "symbol": "—",
+        "value": 0,
+        "percent": 0,
+        "status": "正常"
+      }
+    },
+    "stressTests": []
   }
 }
