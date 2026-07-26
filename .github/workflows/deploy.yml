@@ -1,10 +1,10 @@
 name: Deploy React App to GitHub Pages
 on:
+  repository_dispatch:
+    types: [trigger_update]
   push:
     branches: ["main"]
   workflow_dispatch:
-  schedule:
-    - cron: '30 6 * * *'
 permissions:
   contents: read
   pages: write
@@ -17,9 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
       - name: Install Python Dependencies
@@ -33,8 +33,12 @@ jobs:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
         run: python tg_bot_optimized.py
+      - name: Verify generated dashboard data
+        run: |
+          test -s public/data.json
+          python -m json.tool public/data.json > /dev/null
       - name: Setup Node
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '18'
       - name: Install Node Dependencies

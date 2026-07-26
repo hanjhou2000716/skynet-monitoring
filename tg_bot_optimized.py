@@ -17,6 +17,29 @@ FINMIND_TOKEN = os.getenv("FINMIND_TOKEN")
 GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
 
+
+def upsert_history_snapshot(history_sheet, snapshot_date, values):
+    """Keep one end-of-day snapshot per Taiwan calendar date."""
+    if history_sheet is None:
+        return "skipped"
+
+    snapshot = [snapshot_date, *values]
+    rows = history_sheet.get_all_values()
+    for row_number in range(len(rows), 1, -1):
+        row = rows[row_number - 1]
+        if row and str(row[0]).strip()[:10] == snapshot_date:
+            history_sheet.update(f"A{row_number}:E{row_number}", [snapshot])
+            return "updated"
+
+    history_sheet.append_row(snapshot)
+    return "created"
+
+
+def write_json(path, payload):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+
 # ==========================================
 # 2. Google Sheets 動態資產結算核心
 # ==========================================
@@ -242,10 +265,16 @@ def main():
     bar_blocks = max(0, min(10, int(progress_pct / 10)))
     bar_str = "[" + "█" * bar_blocks + "░" * (10 - bar_blocks) + f"] {progress_pct:.1f}%"
 
-    if total_asset > 0 and history_sheet: 
+    snapshot_result = "skipped"
+    if total_asset > 0:
         try:
-            history_sheet.append_row([tw_now.strftime("%Y-%m-%d"), round(total_asset, 2), round(net_asset, 2), total_debt, round(tsmc_exposure_twd, 2)])
-        except: pass
+            snapshot_result = upsert_history_snapshot(
+                history_sheet,
+                tw_now.strftime("%Y-%m-%d"),
+                [round(total_asset, 2), round(net_asset, 2), round(total_debt, 2), round(tsmc_exposure_twd, 2)],
+            )
+        except Exception as error:
+            print(f"History snapshot update failed: {error}")
 
     # ==========================================
     # ★ 產生網頁專用即時數據 (data.json) ★
@@ -283,8 +312,16 @@ def main():
         "lastUpdated": tw_now.strftime("%Y/%m/%d %H:%M:%S")
     }
 
-    with open('public/data.json', 'w', encoding='utf-8') as f:
-        json.dump(data_for_web, f)
+    data_for_web["status"] = "ok" if total_asset > 0 else "degraded"
+    data_for_web["generatedAt"] = tw_now.isoformat()
+    data_for_web["snapshotResult"] = snapshot_result
+    write_json("public/data.json", data_for_web)
+    write_json("public/status.json", {
+        "status": "ok" if total_asset > 0 else "degraded",
+        "generatedAt": tw_now.isoformat(),
+        "snapshotResult": snapshot_result,
+        "portfolioValueAvailable": total_asset > 0,
+    })
 
     # --- 判斷每日損益，動態生成推播文字 ---
     if daily_diff >= 0:

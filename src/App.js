@@ -26,12 +26,19 @@ const App = () => {
   const [peak006208, setPeak006208] = useState(0);
   const [current006208, setCurrent006208] = useState(0);
   const [lastUpdated, setLastUpdated] = useState("");
+  const [dataState, setDataState] = useState("loading");
+  const [dataError, setDataError] = useState("");
 
   const fetchLatestData = () => {
     setIsFetching(true);
+    setDataState("loading");
+    setDataError("");
     // 讀取 Python 自動產生的真實數據檔案
-    fetch('./data.json')
-      .then(res => res.json())
+    fetch(`${process.env.PUBLIC_URL || ""}/data.json?ts=${Date.now()}`, { cache: "no-store" })
+      .then(res => {
+        if (!res.ok) throw new Error(`Data file unavailable (${res.status})`);
+        return res.json();
+      })
       .then(json => {
         setTaiex(json.taiex);
         setMa200(json.ma200);
@@ -40,9 +47,12 @@ const App = () => {
         setCurrent006208(json.asset_006208);
         setLastUpdated(json.lastUpdated);
         setIsLoaded(true);
+        setDataState(json.status === "degraded" ? "degraded" : "ready");
         setIsFetching(false);
       })
       .catch(err => {
+        setDataState("error");
+        setDataError("資料檔尚未產生或更新失敗，請確認 Cron 已觸發部署後再重試。");
         console.error("讀取數據失敗:", err);
         setIsFetching(false);
       });
@@ -68,7 +78,17 @@ const App = () => {
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-slate-300 font-sans space-y-4">
         <Activity className="w-12 h-12 text-cyan-500 animate-pulse" />
-        <h2 className="text-xl font-bold tracking-wider uppercase">Loading Skynet Core...</h2>
+        <h2 className="text-xl font-bold tracking-wider uppercase">
+          {dataState === "error" ? "DATA UNAVAILABLE" : "Loading Skynet Core..."}
+        </h2>
+        {dataState === "error" && (
+          <>
+            <p className="text-sm text-amber-300 text-center max-w-sm">{dataError}</p>
+            <button onClick={fetchLatestData} className="px-4 py-2 rounded-md bg-slate-800 hover:bg-slate-700 transition-colors">
+              重新載入
+            </button>
+          </>
+        )}
         <p className="text-sm text-slate-500 animate-pulse">正在透過 Python 節點獲取即時市況...</p>
       </div>
     );
