@@ -24,7 +24,9 @@
         "value": 0,
         "percent": 0,
         "status": "正常"
-      }
+      },
+      "twLargestPosition": {"symbol": "—", "percent": 0},
+      "usLargestPosition": {"symbol": "—", "percent": 0}
     },
     "stressTests": [],
     "categoryDailyChanges": {},
