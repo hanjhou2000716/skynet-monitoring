@@ -119,7 +119,7 @@ const App = () => {
                 Skynet Monitoring
               </h1>
               <a href="https://hanjhou2000716.github.io/tgolaf-fin-tracker/" className="text-xs text-cyan-400 mt-1 inline-block tracking-wide">
-                ← Growth Dashboard
+                ← 返回 Growth Dashboard
               </a>
               <p className="text-sm text-slate-400 mt-1">
                 天眼監控與無情退場系統 (S10 DEVTPS 模型核心)
@@ -194,37 +194,19 @@ const App = () => {
                 {portfolio.risk.level === "attention" ? "需處理" : portfolio.risk.level === "watch" ? "持續觀察" : "結構穩定"}
               </span>
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-              {portfolio.allocation.map((item) => (
-                <div key={item.label} className="bg-slate-950 border border-slate-800 p-3">
-                  <div className="text-xs text-slate-500">{item.label}</div>
-                  <div className="text-xl font-mono text-slate-200 mt-1">{item.percent}%</div>
-                  <div className="mt-2 h-1 bg-slate-800"><div className="h-1" style={{ width: `${Math.min(item.percent, 100)}%`, backgroundColor: item.color }} /></div>
-                </div>
-              ))}
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+              <div className="bg-slate-950 border border-slate-800 p-3"><span className="block text-slate-500 text-xs">負債比</span>{portfolio.risk.debtRatio}%</div>
+              <div className="bg-slate-950 border border-slate-800 p-3"><span className="block text-slate-500 text-xs">維持率</span>{portfolio.risk.maintenanceRatio || "—"}%</div>
+              <div className="bg-slate-950 border border-slate-800 p-3"><span className="block text-slate-500 text-xs">TSMC 曝險</span>{portfolio.risk.tsmcExposureRatio}%</div>
+              <div className="bg-slate-950 border border-slate-800 p-3"><span className="block text-slate-500 text-xs">有效槓桿</span>{portfolio.risk.effectiveLeverage}×</div>
+              <div className="bg-slate-950 border border-slate-800 p-3"><span className="block text-slate-500 text-xs">台股最大單一標的</span>{portfolio.risk.twLargestPosition ? `${portfolio.risk.twLargestPosition.symbol} · ${portfolio.risk.twLargestPosition.percent}%` : "待更新"}</div>
+              <div className="bg-slate-950 border border-slate-800 p-3"><span className="block text-slate-500 text-xs">美股最大單一標的</span>{portfolio.risk.usLargestPosition ? `${portfolio.risk.usLargestPosition.symbol} · ${portfolio.risk.usLargestPosition.percent}%` : "待更新"}</div>
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-              <div><span className="block text-slate-500 text-xs">負債比</span>{portfolio.risk.debtRatio}%</div>
-              <div><span className="block text-slate-500 text-xs">維持率</span>{portfolio.risk.maintenanceRatio || "—"}%</div>
-              <div><span className="block text-slate-500 text-xs">TSMC 曝險</span>{portfolio.risk.tsmcExposureRatio}%</div>
-              <div><span className="block text-slate-500 text-xs">有效槓桿</span>{portfolio.risk.effectiveLeverage}×</div>
-            </div>
-            {portfolio.risk.largestPosition && (
-              <div className="mt-5 pt-4 border-t border-slate-800 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-                <div>
-                  <span className="block text-slate-500 text-xs">最大單一標的曝險</span>
-                  <span className="text-base text-slate-200">{portfolio.risk.largestPosition.symbol} · {portfolio.risk.largestPosition.percent}%</span>
-                </div>
-                <span className={`text-xs px-3 py-1 border ${portfolio.risk.largestPosition.status === "警示" ? "text-red-400 border-red-500/50" : portfolio.risk.largestPosition.status === "觀察" ? "text-amber-400 border-amber-500/50" : "text-emerald-400 border-emerald-500/50"}`}>
-                  {portfolio.risk.largestPosition.status} · 20% 觀察 / 35% 警示
-                </span>
-              </div>
-            )}
             {portfolio.stressTests?.length > 0 && (
               <div className="mt-5 pt-4 border-t border-slate-800">
                 <p className="text-xs uppercase tracking-[0.16em] text-slate-500 mb-3">Stress test · net asset impact</p>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  {portfolio.stressTests.map((scenario) => (
+                <div className="grid grid-cols-2 gap-3">
+                  {portfolio.stressTests.filter((scenario) => scenario.label.startsWith("006208")).map((scenario) => (
                     <div key={scenario.label} className="bg-slate-950 border border-slate-800 p-3">
                       <div className="text-xs text-slate-500">{scenario.label}</div>
                       <div className="font-mono text-red-400 mt-1">${Math.round(scenario.netImpact).toLocaleString()}</div>

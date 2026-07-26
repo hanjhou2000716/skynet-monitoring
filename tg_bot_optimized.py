@@ -240,7 +240,7 @@ def main():
         
     usd_rate = get_usd_twd_rate()
     tw_stock_value, us_stock_value_usd, tsmc_exposure_twd, price_006208, leveraged_etf_value = 0, 0, 0, 0, 0
-    position_values_twd = {}
+    position_values_twd, tw_position_values, us_position_values = {}, {}, {}
     
     # 防止 inventory 為空字典崩潰
     cash_twd = inventory.get("現金_TWD", {}).get("TWD", 0)
@@ -253,6 +253,7 @@ def main():
         value = price * shares
         tw_stock_value += value 
         position_values_twd[symbol] = value
+        tw_position_values[symbol] = value
         if symbol == '2330': tsmc_exposure_twd += (value * 1.0)
         elif symbol == '006208': tsmc_exposure_twd += (value * 0.594); price_006208 = price
         elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728); leveraged_etf_value = value
@@ -275,6 +276,7 @@ def main():
         value = get_us_stock_price(symbol) * shares
         us_stock_value_usd += value
         position_values_twd[symbol] = value * usd_rate
+        us_position_values[symbol] = value * usd_rate
         if symbol == 'TSM': tsmc_exposure_twd += (value * usd_rate * 1.0)
 
     us_stock_value_twd = us_stock_value_usd * usd_rate
@@ -314,6 +316,10 @@ def main():
     largest_position_status = "警示" if largest_position_pct >= 35 else "觀察" if largest_position_pct >= 20 else "正常"
     asset_006208_value = position_values_twd.get("006208", 0)
     qqqm_value = position_values_twd.get("QQQM", 0)
+    tw_largest_symbol, tw_largest_value = max(tw_position_values.items(), key=lambda item: item[1], default=("—", 0))
+    us_largest_symbol, us_largest_value = max(us_position_values.items(), key=lambda item: item[1], default=("—", 0))
+    tw_largest_pct = (tw_largest_value / total_asset * 100) if total_asset else 0
+    us_largest_pct = (us_largest_value / total_asset * 100) if total_asset else 0
 
     def stressed_maintenance_ratio(decline):
         stressed_collateral = max(0, pledged_value - (pledged_006208_value * decline))
@@ -401,6 +407,8 @@ def main():
         "tsmcExposureRatio": round(tsmc_pct, 1),
         "effectiveLeverage": round(effective_leverage, 2),
         "largestPosition": {"symbol": largest_symbol, "value": round(largest_position_value, 2), "percent": round(largest_position_pct, 1), "status": largest_position_status},
+        "twLargestPosition": {"symbol": tw_largest_symbol, "percent": round(tw_largest_pct, 1)},
+        "usLargestPosition": {"symbol": us_largest_symbol, "percent": round(us_largest_pct, 1)},
         "nvdaExposureRatio": round(nvda_pct, 1),
     }
 
