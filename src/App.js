@@ -106,37 +106,37 @@ const App = () => {
   const isOpportunityTriggered = parseFloat(drawdownPercent) <= -8.0;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 p-4 md:p-8 font-sans">
-      <div className="max-w-6xl mx-auto space-y-6">
+    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans">
+      <div className="skynet-shell space-y-5">
         {/* Header & Sync Status */}
-        <header className="border-b border-slate-800 pb-4 mb-8 flex flex-col md:flex-row justify-between items-start md:items-end gap-4">
-          <div className="flex items-center space-x-3">
-            <Activity className="text-cyan-500 w-8 h-8" />
+        <header className="skynet-header border-b border-slate-800">
+          <div className="skynet-brand">
+            <Activity className="text-cyan-500 w-7 h-7 mt-1 shrink-0" />
             <div>
-              <h1 className="text-2xl md:text-3xl font-bold text-white tracking-wider uppercase">
+              <h1 className="skynet-title font-bold uppercase">
                 Skynet Monitoring
               </h1>
               <a href="https://hanjhou2000716.github.io/tgolaf-fin-tracker/" className="text-xs text-cyan-400 mt-1 inline-block tracking-wide">
                 ← 返回 Growth Dashboard
               </a>
-              <p className="text-sm text-slate-400 mt-1">
+              <p className="skynet-subtitle mt-1">
                 天眼監控與無情退場系統 (S10 DEVTPS 模型核心)
               </p>
             </div>
           </div>
-          <div className="flex items-center space-x-4 bg-slate-900/50 p-2 md:p-3 rounded-lg border border-slate-800">
-            <div className="flex flex-col text-right">
-              <span className="text-xs text-slate-500">
+          <div className="skynet-sync flex items-center justify-between gap-3">
+            <div className="flex flex-col">
+              <span className="text-xs text-slate-500 tracking-wide">
                 REAL MARKET DATA
               </span>
-              <span className="text-sm font-mono text-slate-300">
+              <strong className="font-mono">
                 Data Sync: {lastUpdated}
-              </span>
+              </strong>
             </div>
             <button
               onClick={fetchLatestData}
               disabled={isFetching}
-              className="p-2 bg-slate-800 hover:bg-slate-700 rounded-md transition-colors disabled:opacity-50"
+              className="p-2 bg-slate-800 hover:bg-slate-700 rounded-md transition-colors disabled:opacity-50 shrink-0"
               title="強制刷新市況"
             >
               {isFetching ? (
@@ -150,7 +150,7 @@ const App = () => {
 
         {/* Top Banner: Protocol Status */}
         <div
-          className={`p-6 rounded-xl border-2 transition-all duration-500 flex items-center justify-between ${
+          className={`skynet-status border-2 transition-all duration-500 flex items-center justify-between ${
             isProtocolTriggered
               ? "bg-red-950/50 border-red-500 shadow-[0_0_30px_rgba(239,68,68,0.3)]"
               : "bg-emerald-950/30 border-emerald-500/50"
@@ -224,7 +224,7 @@ const App = () => {
           <div className="lg:col-span-2 space-y-6">
             {/* Indicator 1: TAIEX vs 200MA */}
             <div
-              className={`p-5 rounded-xl border ${
+              className={`skynet-card border ${
                 isTaiexTriggered
                   ? "bg-red-950/40 border-red-500/50"
                   : "bg-slate-900 border-slate-800"
@@ -233,7 +233,7 @@ const App = () => {
               <div className="flex justify-between items-start mb-4">
                 <div className="flex items-center space-x-2">
                   <BarChart2 className="w-5 h-5 text-indigo-400" />
-                  <h3 className="text-lg font-semibold text-white">
+                  <h3 className="skynet-card-title font-semibold text-white">
                     宏觀趨勢：加權指數 vs 200MA
                   </h3>
                 </div>
@@ -247,33 +247,33 @@ const App = () => {
                   條件 1
                 </span>
               </div>
-              <div className="grid grid-cols-3 gap-4 mb-4">
-                <div className="bg-slate-950 p-3 rounded-lg">
-                  <div className="text-xs text-slate-500 mb-1">
+              <div className="skynet-kpi-grid three mb-4">
+                <div className="skynet-kpi">
+                  <div className="skynet-kpi-label">
                     目前加權指數
                   </div>
                   <div
-                    className={`text-xl font-mono ${
+                    className={`skynet-kpi-value font-mono ${
                       isTaiexBelowMA ? "text-orange-400" : "text-emerald-400"
                     }`}
                   >
                     {taiex.toLocaleString()}
                   </div>
                 </div>
-                <div className="bg-slate-950 p-3 rounded-lg">
-                  <div className="text-xs text-slate-500 mb-1">
+                <div className="skynet-kpi">
+                  <div className="skynet-kpi-label">
                     200日均線 (200MA)
                   </div>
-                  <div className="text-xl font-mono text-indigo-400">
+                  <div className="skynet-kpi-value font-mono text-indigo-400">
                     {ma200.toLocaleString()}
                   </div>
                 </div>
-                <div className="bg-slate-950 p-3 rounded-lg">
-                  <div className="text-xs text-slate-500 mb-1">
+                <div className="skynet-kpi">
+                  <div className="skynet-kpi-label">
                     連續跌破天數
                   </div>
                   <div
-                    className={`text-xl font-mono ${
+                    className={`skynet-kpi-value font-mono ${
                       daysBelowMa >= 3
                         ? "text-red-500"
                         : daysBelowMa > 0
@@ -297,7 +297,7 @@ const App = () => {
 
             {/* Indicator 2: VIX */}
             <div
-              className={`p-5 rounded-xl border ${
+              className={`skynet-card border ${
                 isVixTriggered
                   ? "bg-red-950/40 border-red-500/50"
                   : "bg-slate-900 border-slate-800"
@@ -306,7 +306,7 @@ const App = () => {
               <div className="flex justify-between items-start mb-4">
                 <div className="flex items-center space-x-2">
                   <TrendingDown className="w-5 h-5 text-purple-400" />
-                  <h3 className="text-lg font-semibold text-white">
+                  <h3 className="skynet-card-title font-semibold text-white">
                     市場情緒：CBOE VIX 指數
                   </h3>
                 </div>
@@ -320,25 +320,25 @@ const App = () => {
                   條件 2
                 </span>
               </div>
-              <div className="grid grid-cols-2 gap-4 mb-4">
-                <div className="bg-slate-950 p-3 rounded-lg">
-                  <div className="text-xs text-slate-500 mb-1">
+              <div className="skynet-kpi-grid two mb-4">
+                <div className="skynet-kpi">
+                  <div className="skynet-kpi-label">
                     VIX 目前數值
                   </div>
                   <div
-                    className={`text-xl font-mono ${
+                    className={`skynet-kpi-value font-mono ${
                       vix > 20 ? "text-orange-400" : "text-emerald-400"
                     }`}
                   >
                     {vix.toFixed(2)}
                   </div>
                 </div>
-                <div className="bg-slate-950 p-3 rounded-lg">
-                  <div className="text-xs text-slate-500 mb-1">
+                <div className="skynet-kpi">
+                  <div className="skynet-kpi-label">
                     連續大於 20 天數
                   </div>
                   <div
-                    className={`text-xl font-mono ${
+                    className={`skynet-kpi-value font-mono ${
                       daysVixAbove20 >= 2
                         ? "text-red-500"
                         : daysVixAbove20 > 0
@@ -362,7 +362,7 @@ const App = () => {
 
             {/* Indicator 3: Opportunistic Leverage */}
             <div
-              className={`p-5 rounded-xl border ${
+              className={`skynet-card border ${
                 isOpportunityTriggered
                   ? "bg-cyan-950/40 border-cyan-500/50 shadow-[0_0_15px_rgba(6,182,212,0.15)]"
                   : "bg-slate-900 border-slate-800"
@@ -371,7 +371,7 @@ const App = () => {
               <div className="flex justify-between items-start mb-4">
                 <div className="flex items-center space-x-2">
                   <Crosshair className="w-5 h-5 text-cyan-400" />
-                  <h3 className="text-lg font-semibold text-white">
+                  <h3 className="skynet-card-title font-semibold text-white">
                     機會型槓桿指標：核心回撤監控
                   </h3>
                 </div>
@@ -385,27 +385,27 @@ const App = () => {
                   進階疊加
                 </span>
               </div>
-              <div className="grid grid-cols-3 gap-4 mb-4">
-                <div className="bg-slate-950 p-3 rounded-lg">
-                  <div className="text-xs text-slate-500 mb-1">
+              <div className="skynet-kpi-grid three mb-4">
+                <div className="skynet-kpi">
+                  <div className="skynet-kpi-label">
                     006208 波段高點
                   </div>
-                  <div className="text-xl font-mono text-slate-300">
+                  <div className="skynet-kpi-value font-mono text-slate-300">
                     {peak006208.toFixed(2)}
                   </div>
                 </div>
-                <div className="bg-slate-950 p-3 rounded-lg">
-                  <div className="text-xs text-slate-500 mb-1">目前價格</div>
-                  <div className="text-xl font-mono text-slate-300">
+                <div className="skynet-kpi">
+                  <div className="skynet-kpi-label">目前價格</div>
+                  <div className="skynet-kpi-value font-mono text-slate-300">
                     {current006208.toFixed(2)}
                   </div>
                 </div>
-                <div className="bg-slate-950 p-3 rounded-lg">
-                  <div className="text-xs text-slate-500 mb-1">
+                <div className="skynet-kpi">
+                  <div className="skynet-kpi-label">
                     技術性回撤幅度
                   </div>
                   <div
-                    className={`text-xl font-mono ${
+                    className={`skynet-kpi-value font-mono ${
                       isOpportunityTriggered
                         ? "text-cyan-400 font-bold"
                         : "text-slate-400"
@@ -429,7 +429,7 @@ const App = () => {
 
           {}
           {/* Right Column: Simulation Controls (The "Sand table") */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 h-fit">
+          <div className="skynet-simulator bg-slate-900 border border-slate-800 p-5 h-fit">
             <h3 className="text-lg font-bold text-white mb-6 border-b border-slate-700 pb-2 flex items-center">
               <Activity className="w-4 h-4 mr-2" />
               動態市場參數模擬器
