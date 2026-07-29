@@ -40,11 +40,13 @@ const App = () => {
         return res.json();
       })
       .then(json => {
-        setTaiex(json.taiex);
-        setMa200(json.ma200);
-        setVix(json.vix);
-        setPeak006208(json.peak_006208);
-        setCurrent006208(json.asset_006208);
+        setTaiex(Number(json.taiex) || 0);
+        setMa200(Number(json.ma200) || 0);
+        setDaysBelowMa(Number(json.daysBelowMa) || 0);
+        setVix(Number(json.vix) || 0);
+        setDaysVixAbove20(Number(json.daysVixAbove20) || 0);
+        setPeak006208(Number(json.peak_006208) || 0);
+        setCurrent006208(Number(json.asset_006208) || 0);
         setLastUpdated(json.lastUpdated);
         setIsLoaded(true);
         setDataState(json.status === "degraded" ? "degraded" : "ready");
@@ -94,7 +96,7 @@ const App = () => {
     );
   }
 
-  const isTaiexBelowMA = taiex < ma200;
+  const isTaiexBelowMA = ma200 > 0 && taiex < ma200;
   const isTaiexTriggered = isTaiexBelowMA && daysBelowMa >= 3;
 
   const isVixHigh = vix > 20;
@@ -102,8 +104,10 @@ const App = () => {
 
   const isProtocolTriggered = isTaiexTriggered || isVixTriggered;
 
-  const drawdownPercent = (((current006208 - peak006208) / peak006208) * 100).toFixed(2);
-  const isOpportunityTriggered = parseFloat(drawdownPercent) <= -8.0;
+  const drawdownPercent = peak006208 > 0
+    ? (((current006208 - peak006208) / peak006208) * 100).toFixed(2)
+    : "—";
+  const isOpportunityTriggered = drawdownPercent !== "—" && parseFloat(drawdownPercent) <= -8.0;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 font-sans">
@@ -129,8 +133,8 @@ const App = () => {
               <span className="text-xs text-slate-500 tracking-wide">
                 REAL MARKET DATA
               </span>
-              <strong className="font-mono">
-                Data Sync: {lastUpdated}
+              <strong className={`font-mono ${dataState === "degraded" ? "text-amber-400" : ""}`}>
+                {dataState === "degraded" ? "資料來源不完整" : "Data Sync"}: {lastUpdated}
               </strong>
             </div>
             <button

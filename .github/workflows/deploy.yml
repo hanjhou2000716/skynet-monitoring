@@ -2,6 +2,11 @@ name: Deploy React App to GitHub Pages
 on:
   repository_dispatch:
     types: [trigger_update]
+  # Backup for the external dispatcher: 14:10 and 05:40 Asia/Taipei on
+  # market weekdays. It is safe to overlap because the workflow is concurrent.
+  schedule:
+    - cron: "10 6 * * 1-5"
+    - cron: "40 21 * * 0-4"
   push:
     branches: ["main"]
   workflow_dispatch:
@@ -25,18 +30,15 @@ jobs:
       - name: Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests yfinance gspread google-auth
+          pip install yfinance
       - name: Run Skynet Python Core
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-          GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
         run: python tg_bot_optimized.py
       - name: Verify generated dashboard data
         run: |
           test -s public/data.json
+          test -s public/status.json
           python -m json.tool public/data.json > /dev/null
+          python -m json.tool public/status.json > /dev/null
       - name: Setup Node
         uses: actions/setup-node@v7.0.0
         with:
