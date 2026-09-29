@@ -2,23 +2,52 @@ name: Deploy React App to GitHub Pages
 on:
   repository_dispatch:
     types: [trigger_update]
-  # Backup for the external dispatcher: 14:10 and 05:40 Asia/Taipei on
-  # market weekdays. It is safe to overlap because the workflow is concurrent.
+  # Primary updates at 06:40 / 14:45 Asia/Taipei, daily. Fallbacks at
+  # 07:40 / 15:45 are gated against the deployed status contract.
   schedule:
-    - cron: "10 6 * * 1-5"
-    - cron: "40 21 * * 0-4"
+    - cron: "40 22 * * *"
+    - cron: "45 6 * * *"
+    - cron: "40 23 * * *"
+    - cron: "45 7 * * *"
   push:
     branches: ["main"]
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 concurrency:
   group: "pages"
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decision.outputs.run }}
+      reason: ${{ steps.decision.outputs.reason }}
+      window_date: ${{ steps.decision.outputs.window_date }}
+      window: ${{ steps.decision.outputs.window }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.10'
+      - name: Decide whether this window needs an update
+        id: decision
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python schedule_gate.py
+      - name: Record schedule gate result
+        run: |
+          echo "### Skynet schedule gate" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Result: ${{ steps.decision.outputs.reason }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Taiwan window: ${{ steps.decision.outputs.window_date }} ${{ steps.decision.outputs.window }}" >> "$GITHUB_STEP_SUMMARY"
   build:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -31,7 +60,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install yfinance
+      - name: Restore validated official market calendar cache
+        uses: actions/cache@v4
+        with:
+          path: .calendar-cache
+          key: ${{ runner.os }}-skynet-calendar-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-skynet-calendar-v1-
+      - name: Run Skynet tests
+        run: python -m unittest discover -s tests -v
       - name: Run Skynet Python Core
+        env:
+          TARGET_WINDOW: ${{ needs.gate.outputs.window }}
+          TARGET_WINDOW_DATE: ${{ needs.gate.outputs.window_date }}
         run: python tg_bot_optimized.py
       - name: Verify generated dashboard data
         run: |
