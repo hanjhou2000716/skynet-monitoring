@@ -11,21 +11,41 @@ import {
   CheckCircle2,
 } from "lucide-react";
 
+const finiteMetric = (value) => {
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const showNumber = (value, digits = 0) => {
+  const parsed = finiteMetric(value);
+  return parsed === null ? "—" : parsed.toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+};
+
+const marketFresh = (market) => Boolean(
+  market && ["fresh", "market_closed"].includes(market.status) &&
+  market.latestSessionDate && market.latestSessionDate === market.expectedSessionDate
+);
+
 const App = () => {
   const [isLoaded, setIsLoaded] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
 
   // --- 狀態變數 (從真實數據載入，保留使用者微調能力) ---
-  const [taiex, setTaiex] = useState(0);
-  const [ma200, setMa200] = useState(0);
-  const [daysBelowMa, setDaysBelowMa] = useState(0);
+  const [taiex, setTaiex] = useState(null);
+  const [ma200, setMa200] = useState(null);
+  const [daysBelowMa, setDaysBelowMa] = useState(null);
 
-  const [vix, setVix] = useState(0);
-  const [daysVixAbove20, setDaysVixAbove20] = useState(0);
+  const [vix, setVix] = useState(null);
+  const [daysVixAbove20, setDaysVixAbove20] = useState(null);
 
-  const [peak006208, setPeak006208] = useState(0);
-  const [current006208, setCurrent006208] = useState(0);
+  const [peak006208, setPeak006208] = useState(null);
+  const [current006208, setCurrent006208] = useState(null);
   const [lastUpdated, setLastUpdated] = useState("");
+  const [marketMeta, setMarketMeta] = useState({ taiwan: {}, us: {} });
   const [dataState, setDataState] = useState("loading");
   const [dataError, setDataError] = useState("");
 
@@ -40,16 +60,53 @@ const App = () => {
         return res.json();
       })
       .then(json => {
-        setTaiex(Number(json.taiex) || 0);
-        setMa200(Number(json.ma200) || 0);
-        setDaysBelowMa(Number(json.daysBelowMa) || 0);
-        setVix(Number(json.vix) || 0);
-        setDaysVixAbove20(Number(json.daysVixAbove20) || 0);
-        setPeak006208(Number(json.peak_006208) || 0);
-        setCurrent006208(Number(json.asset_006208) || 0);
-        setLastUpdated(json.lastUpdated);
+        const nextTaiex = finiteMetric(json.taiex);
+        const nextMa200 = finiteMetric(json.ma200);
+        const nextDaysBelowMa = finiteMetric(json.daysBelowMa);
+        const nextVix = finiteMetric(json.vix);
+        const nextDaysVixAbove20 = finiteMetric(json.daysVixAbove20);
+        const nextPeak = finiteMetric(json.peak_006208);
+        const nextCurrent = finiteMetric(json.asset_006208);
+        const markets = json.markets || {};
+        const sources = json.dataQuality?.sources || {};
+        const sourceValuesOkay = ["taiex", "vix", "006208"].every((key) => sources[key] === "ok");
+        const valuesOkay = [nextTaiex, nextMa200, nextDaysBelowMa, nextVix,
+          nextDaysVixAbove20, nextPeak, nextCurrent].every((value) => value !== null);
+        const contractOkay = json.schemaVersion === 2 && json.calendar?.status === "verified" &&
+          json.service?.status === "ok" && marketFresh(markets.taiwan) && marketFresh(markets.us);
+        const healthy = json.status === "ok" && contractOkay && sourceValuesOkay && valuesOkay;
+
+        setTaiex(nextTaiex);
+        setMa200(nextMa200);
+        setDaysBelowMa(nextDaysBelowMa);
+        setVix(nextVix);
+        setDaysVixAbove20(nextDaysVixAbove20);
+        setPeak006208(nextPeak);
+        setCurrent006208(nextCurrent);
+        setLastUpdated(json.lastUpdated || json.generatedAt || "");
+        setMarketMeta({
+          taiwan: markets.taiwan || {},
+          us: markets.us || {},
+          calendar: json.calendar || {},
+        });
         setIsLoaded(true);
-        setDataState(json.status === "degraded" ? "degraded" : "ready");
+        setDataState(healthy ? "ready" : "degraded");
+        const causes = [markets.taiwan, markets.us]
+          .filter((market) => market && !marketFresh(market))
+          .map((market) => {
+            const code = market.reasonCode || market.status;
+            const labels = {
+              CALENDAR_UNVERIFIED: "交易日曆待確認",
+              MARKET_DATA_STALE: "行情未更新至應有交易日",
+              SOURCE_UNAVAILABLE: "行情來源暫不可用",
+              OFFICIAL_MARKET_CLOSED: "官方休市",
+            };
+            return labels[code] || "行情狀態待確認";
+          });
+        if (json.calendar?.status !== "verified") causes.push("交易日曆待確認");
+        if (!sourceValuesOkay) causes.push("必要行情來源不完整");
+        if (!valuesOkay) causes.push("計算所需資料不足");
+        setDataError(healthy ? "" : Array.from(new Set(causes)).join("；") || "資料契約版本待確認，暫停操作建議。");
         setIsFetching(false);
       })
       .catch(err => {
@@ -65,15 +122,15 @@ const App = () => {
   }, []);
 
   useEffect(() => {
-    if (taiex >= ma200) setDaysBelowMa(0);
+    if (Number.isFinite(taiex) && Number.isFinite(ma200) && taiex >= ma200) setDaysBelowMa(0);
   }, [taiex, ma200]);
 
   useEffect(() => {
-    if (vix <= 20) setDaysVixAbove20(0);
+    if (Number.isFinite(vix) && vix <= 20) setDaysVixAbove20(0);
   }, [vix]);
 
   useEffect(() => {
-    if (current006208 > peak006208) setPeak006208(current006208);
+    if (Number.isFinite(current006208) && Number.isFinite(peak006208) && current006208 > peak006208) setPeak006208(current006208);
   }, [current006208, peak006208]);
 
   if (!isLoaded) {
@@ -91,23 +148,29 @@ const App = () => {
             </button>
           </>
         )}
-        <p className="text-sm text-slate-500 animate-pulse">正在透過 Python 節點獲取即時市況...</p>
+        <p className="text-sm text-slate-500 animate-pulse">正在載入已完成交易日行情與健康狀態...</p>
       </div>
     );
   }
 
-  const isTaiexBelowMA = ma200 > 0 && taiex < ma200;
+  const dataConfirmed = dataState === "ready";
+  const isTaiexBelowMA = dataConfirmed && ma200 > 0 && taiex < ma200;
   const isTaiexTriggered = isTaiexBelowMA && daysBelowMa >= 3;
 
-  const isVixHigh = vix > 20;
+  const isVixHigh = dataConfirmed && vix > 20;
   const isVixTriggered = isVixHigh && daysVixAbove20 >= 2;
 
-  const isProtocolTriggered = isTaiexTriggered || isVixTriggered;
+  const isProtocolTriggered = dataConfirmed && (isTaiexTriggered || isVixTriggered);
 
-  const drawdownPercent = peak006208 > 0
+  const drawdownPercent = Number.isFinite(peak006208) && Number.isFinite(current006208) && peak006208 > 0
     ? (((current006208 - peak006208) / peak006208) * 100).toFixed(2)
     : "—";
-  const isOpportunityTriggered = drawdownPercent !== "—" && parseFloat(drawdownPercent) <= -8.0;
+  const isOpportunityTriggered = dataConfirmed && drawdownPercent !== "—" && parseFloat(drawdownPercent) <= -8.0;
+  const marketDateLabel = (market, label) => {
+    if (market.status === "market_closed") return `${label}休市｜行情截至 ${market.latestSessionDate || "—"}`;
+    if (marketFresh(market)) return `${label}行情截至 ${market.latestSessionDate}`;
+    return `${label}行情待確認｜${market.latestSessionDate || "—"}`;
+  };
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-200 font-sans">
@@ -131,10 +194,10 @@ const App = () => {
           <div className="skynet-sync flex items-center justify-between gap-3">
             <div className="flex flex-col">
               <span className="text-xs text-slate-500 tracking-wide">
-                REAL MARKET DATA
+                COMPLETED MARKET DATA
               </span>
-              <strong className={`font-mono ${dataState === "degraded" ? "text-amber-400" : ""}`}>
-                {dataState === "degraded" ? "資料來源不完整" : "Data Sync"}: {lastUpdated}
+              <strong className={`font-mono ${dataState !== "ready" ? "text-amber-400" : ""}`}>
+                {dataState === "degraded" ? "資料待確認" : "Data Sync"}: {lastUpdated || "—"}
               </strong>
             </div>
             <button
@@ -153,15 +216,15 @@ const App = () => {
         </header>
 
         {/* Top Banner: Protocol Status */}
-        <div
-          className={`skynet-status border-2 transition-all duration-500 flex items-center justify-between ${
-            isProtocolTriggered
-              ? "bg-red-950/50 border-red-500 shadow-[0_0_30px_rgba(239,68,68,0.3)]"
-              : "bg-emerald-950/30 border-emerald-500/50"
-          }`}
-        >
+        <div className={`skynet-status border-2 transition-all duration-500 flex items-center justify-between ${
+          dataState !== "ready" ? "bg-amber-950/30 border-amber-500/60" : isProtocolTriggered
+            ? "bg-red-950/50 border-red-500 shadow-[0_0_30px_rgba(239,68,68,0.3)]"
+            : "bg-emerald-950/30 border-emerald-500/50"
+        }`}>
           <div className="flex items-center space-x-4">
-            {isProtocolTriggered ? (
+            {dataState !== "ready" ? (
+              <AlertTriangle className="w-12 h-12 text-amber-400" />
+            ) : isProtocolTriggered ? (
               <ShieldAlert className="w-12 h-12 text-red-500 animate-pulse" />
             ) : (
               <ShieldAlert className="w-12 h-12 text-emerald-500" />
@@ -169,15 +232,15 @@ const App = () => {
             <div>
               <h2
                 className={`text-2xl font-bold tracking-wide ${
-                  isProtocolTriggered ? "text-red-400" : "text-emerald-400"
+                  dataState !== "ready" ? "text-amber-300" : isProtocolTriggered ? "text-red-400" : "text-emerald-400"
                 }`}
               >
-                {isProtocolTriggered
+                {dataState !== "ready" ? "資料待確認" : isProtocolTriggered
                   ? "PROTOCOL ACTIVATED: 無情退場協議啟動"
                   : "SYSTEM SAFE: 監控系統安全"}
               </h2>
               <p className="text-slate-300 mt-1">
-                {isProtocolTriggered
+                {dataState !== "ready" ? (dataError || "必要行情或日曆資料不完整，暫停依據本頁產生操作建議。") : isProtocolTriggered
                   ? "⚠️ 警告：已觸發系統性風險指標！請立即啟動降槓桿程序，清算衛星部位 (00685L)，回歸 100% 核心原型資產。"
                   : "✅ 目前市場雜訊在容許範圍內，維持現有槓桿配置，持續享有逆價差與曝險增益。"}
               </p>
@@ -258,10 +321,10 @@ const App = () => {
                   </div>
                   <div
                     className={`skynet-kpi-value font-mono ${
-                      isTaiexBelowMA ? "text-orange-400" : "text-emerald-400"
+                      !dataConfirmed ? "text-slate-400" : isTaiexBelowMA ? "text-orange-400" : "text-emerald-400"
                     }`}
                   >
-                    {taiex.toLocaleString()}
+                    {showNumber(taiex)}
                   </div>
                 </div>
                 <div className="skynet-kpi">
@@ -269,7 +332,7 @@ const App = () => {
                     200日均線 (200MA)
                   </div>
                   <div className="skynet-kpi-value font-mono text-indigo-400">
-                    {ma200.toLocaleString()}
+                    {showNumber(ma200)}
                   </div>
                 </div>
                 <div className="skynet-kpi">
@@ -278,17 +341,18 @@ const App = () => {
                   </div>
                   <div
                     className={`skynet-kpi-value font-mono ${
-                      daysBelowMa >= 3
+                      !dataConfirmed ? "text-slate-400" : daysBelowMa >= 3
                         ? "text-red-500"
                         : daysBelowMa > 0
                         ? "text-orange-400"
                         : "text-slate-300"
                     }`}
                   >
-                    {daysBelowMa} 天
+                    {showNumber(daysBelowMa)} 天
                   </div>
                 </div>
               </div>
+              <p className="text-xs text-slate-400">{marketDateLabel(marketMeta.taiwan, "台股")}</p>
               {isTaiexTriggered && (
                 <div className="flex items-center space-x-2 text-sm text-red-400 bg-red-950/50 p-2 rounded">
                   <AlertTriangle className="w-4 h-4" />
@@ -331,10 +395,10 @@ const App = () => {
                   </div>
                   <div
                     className={`skynet-kpi-value font-mono ${
-                      vix > 20 ? "text-orange-400" : "text-emerald-400"
+                      !dataConfirmed ? "text-slate-400" : vix > 20 ? "text-orange-400" : "text-emerald-400"
                     }`}
                   >
-                    {vix.toFixed(2)}
+                    {showNumber(vix, 2)}
                   </div>
                 </div>
                 <div className="skynet-kpi">
@@ -343,17 +407,18 @@ const App = () => {
                   </div>
                   <div
                     className={`skynet-kpi-value font-mono ${
-                      daysVixAbove20 >= 2
+                      !dataConfirmed ? "text-slate-400" : daysVixAbove20 >= 2
                         ? "text-red-500"
                         : daysVixAbove20 > 0
                         ? "text-orange-400"
                         : "text-slate-300"
                     }`}
                   >
-                    {daysVixAbove20} 天
+                    {showNumber(daysVixAbove20)} 天
                   </div>
                 </div>
               </div>
+              <p className="text-xs text-slate-400">{marketDateLabel(marketMeta.us, "美股")}</p>
               {isVixTriggered && (
                 <div className="flex items-center space-x-2 text-sm text-red-400 bg-red-950/50 p-2 rounded">
                   <AlertTriangle className="w-4 h-4" />
@@ -395,13 +460,13 @@ const App = () => {
                     006208 波段高點
                   </div>
                   <div className="skynet-kpi-value font-mono text-slate-300">
-                    {peak006208.toFixed(2)}
+                    {showNumber(peak006208, 2)}
                   </div>
                 </div>
                 <div className="skynet-kpi">
                   <div className="skynet-kpi-label">目前價格</div>
                   <div className="skynet-kpi-value font-mono text-slate-300">
-                    {current006208.toFixed(2)}
+                    {showNumber(current006208, 2)}
                   </div>
                 </div>
                 <div className="skynet-kpi">
@@ -419,6 +484,7 @@ const App = () => {
                   </div>
                 </div>
               </div>
+              <p className="text-xs text-slate-400">{marketDateLabel(marketMeta.taiwan, "006208")}</p>
               {isOpportunityTriggered && (
                 <div className="flex items-center space-x-2 text-sm text-cyan-400 bg-cyan-950/50 p-2 rounded border border-cyan-800/50">
                   <Info className="w-4 h-4" />
@@ -451,7 +517,7 @@ const App = () => {
                 <label className="flex justify-between text-xs text-slate-400 mb-1">
                   <span>加權指數 (TAIEX)</span>
                   <span className="text-slate-300 transition-colors">
-                    {taiex}
+                    {showNumber(taiex)}
                   </span>
                 </label>
                 <input
@@ -459,7 +525,8 @@ const App = () => {
                   min="15000"
                   max="35000"
                   step="10"
-                  value={taiex}
+                  value={finiteMetric(taiex) ?? 15000}
+                  disabled={!dataConfirmed}
                   onChange={(e) => setTaiex(Number(e.target.value))}
                   className="w-full accent-indigo-500"
                 />
@@ -467,14 +534,15 @@ const App = () => {
               <div>
                 <label className="flex justify-between text-xs text-slate-400 mb-1">
                   <span>200日均線 (200MA)</span>
-                  <span>{ma200}</span>
+                  <span>{showNumber(ma200)}</span>
                 </label>
                 <input
                   type="range"
                   min="15000"
                   max="35000"
                   step="100"
-                  value={ma200}
+                  value={finiteMetric(ma200) ?? 15000}
+                  disabled={!dataConfirmed}
                   onChange={(e) => setMa200(Number(e.target.value))}
                   className="w-full accent-indigo-500"
                 />
@@ -488,14 +556,15 @@ const App = () => {
               >
                 <label className="flex justify-between text-xs text-slate-400 mb-1">
                   <span>實體跌破 200MA 天數</span>
-                  <span>{daysBelowMa} 天</span>
+                  <span>{showNumber(daysBelowMa)} 天</span>
                 </label>
                 <input
                   type="range"
                   min="0"
                   max="5"
                   step="1"
-                  value={daysBelowMa}
+                  value={finiteMetric(daysBelowMa) ?? 0}
+                  disabled={!dataConfirmed}
                   onChange={(e) => setDaysBelowMa(Number(e.target.value))}
                   className="w-full accent-red-500"
                 />
@@ -511,7 +580,7 @@ const App = () => {
                 <label className="flex justify-between text-xs text-slate-400 mb-1">
                   <span>CBOE VIX 數值</span>
                   <span className="text-slate-300 transition-colors">
-                    {vix.toFixed(2)}
+                    {showNumber(vix, 2)}
                   </span>
                 </label>
                 <input
@@ -519,7 +588,8 @@ const App = () => {
                   min="10"
                   max="40"
                   step="0.1"
-                  value={vix}
+                  value={finiteMetric(vix) ?? 10}
+                  disabled={!dataConfirmed}
                   onChange={(e) => setVix(Number(e.target.value))}
                   className="w-full accent-purple-500"
                 />
@@ -531,14 +601,15 @@ const App = () => {
               >
                 <label className="flex justify-between text-xs text-slate-400 mb-1">
                   <span>連續大於 20 天數</span>
-                  <span>{daysVixAbove20} 天</span>
+                  <span>{showNumber(daysVixAbove20)} 天</span>
                 </label>
                 <input
                   type="range"
                   min="0"
                   max="5"
                   step="1"
-                  value={daysVixAbove20}
+                  value={finiteMetric(daysVixAbove20) ?? 0}
+                  disabled={!dataConfirmed}
                   onChange={(e) => setDaysVixAbove20(Number(e.target.value))}
                   className="w-full accent-red-500"
                 />
@@ -553,14 +624,15 @@ const App = () => {
               <div>
                 <label className="flex justify-between text-xs text-slate-400 mb-1">
                   <span>前波歷史高點</span>
-                  <span>{peak006208.toFixed(2)}</span>
+                  <span>{showNumber(peak006208, 2)}</span>
                 </label>
                 <input
                   type="range"
                   min="50"
                   max="150"
                   step="0.5"
-                  value={peak006208}
+                  value={finiteMetric(peak006208) ?? 50}
+                  disabled={!dataConfirmed}
                   onChange={(e) => setPeak006208(Number(e.target.value))}
                   className="w-full accent-cyan-500"
                 />
@@ -569,7 +641,7 @@ const App = () => {
                 <label className="flex justify-between text-xs text-slate-400 mb-1">
                   <span>目前現股市價</span>
                   <span className="text-slate-300 transition-colors">
-                    {current006208.toFixed(2)}
+                    {showNumber(current006208, 2)}
                   </span>
                 </label>
                 <input
@@ -577,7 +649,8 @@ const App = () => {
                   min="50"
                   max="150"
                   step="0.5"
-                  value={current006208}
+                  value={finiteMetric(current006208) ?? 50}
+                  disabled={!dataConfirmed}
                   onChange={(e) => setCurrent006208(Number(e.target.value))}
                   className="w-full accent-cyan-500"
                 />
