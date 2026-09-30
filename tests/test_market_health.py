@@ -1,6 +1,7 @@
 import datetime as dt
 import json
 import os
+import ssl
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -8,6 +9,8 @@ from unittest.mock import patch
 from market_health import (
     CalendarUnavailable,
     TAIPEI,
+    TWSE_URL,
+    _request_text,
     expected_taiwan_session,
     expected_us_session,
     load_calendars,
@@ -34,6 +37,26 @@ Early Close,2026-11-27,9:30 a.m. - 1:00 p.m. ET,Open
 
 
 class MarketCalendarTests(unittest.TestCase):
+    def test_twse_tls_relaxes_only_strict_profile_and_keeps_trust_checks(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b"verified calendar"
+
+        with patch("market_health.urlopen", return_value=Response()) as open_url:
+            self.assertEqual(_request_text(TWSE_URL), "verified calendar")
+        context = open_url.call_args.kwargs["context"]
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+        strict_flag = getattr(ssl, "VERIFY_X509_STRICT", 0)
+        if strict_flag:
+            self.assertEqual(context.verify_flags & strict_flag, 0)
+
     def test_twse_calendar_identifies_closures_and_open_special_dates(self):
         parsed = parse_twse_calendar(TWSE_FIXTURE)
         self.assertEqual(parsed["years"], [2026])
@@ -41,6 +64,16 @@ class MarketCalendarTests(unittest.TestCase):
 
     def test_cboe_calendar_only_marks_full_closures(self):
         parsed = parse_cboe_calendar(CBOE_FIXTURE)
+        self.assertEqual(parsed["closedDates"], ["2026-01-01", "2026-04-03"])
+
+    def test_cboe_calendar_skips_current_metadata_preamble(self):
+        response = (
+            '# Generated: 2026:09:30 00:00:47\\n#\\n'
+            '# Start CSV parsing at the line after the "##".\\n#\\n##\r\n'
+            + CBOE_FIXTURE
+        )
+        parsed = parse_cboe_calendar(response)
+        self.assertEqual(parsed["years"], [2026])
         self.assertEqual(parsed["closedDates"], ["2026-01-01", "2026-04-03"])
 
     def test_four_day_taiwan_closure_expected_session_and_next_deadline(self):

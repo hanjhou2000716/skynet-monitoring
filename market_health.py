@@ -8,6 +8,7 @@ import io
 import json
 import os
 import re
+import ssl
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -59,7 +60,17 @@ def _request_text(url):
     for attempt in range(3):
         try:
             request = Request(url, headers={"User-Agent": "SkynetMarketHealth/1.0"})
-            with urlopen(request, timeout=12) as response:
+            request_options = {"timeout": 12}
+            if url == TWSE_URL:
+                context = ssl.create_default_context()
+                strict_flag = getattr(ssl, "VERIFY_X509_STRICT", 0)
+                if strict_flag:
+                    # TWSE's trusted certificate chain omits an optional issuer
+                    # Subject Key Identifier. Keep CA and hostname validation,
+                    # while avoiding OpenSSL's extra strict-profile rejection.
+                    context.verify_flags &= ~strict_flag
+                request_options["context"] = context
+            with urlopen(request, **request_options) as response:
                 return response.read().decode("utf-8-sig")
         except HTTPError as error:
             last_error = error
@@ -95,7 +106,15 @@ def parse_twse_calendar(body):
 
 
 def parse_cboe_calendar(body):
-    reader = csv.DictReader(io.StringIO(body))
+    # Cboe prefixes the CSV with metadata and a ## delimiter. The metadata
+    # currently encodes its newlines as literal backslash-n sequences.
+    normalized = body
+    if body.startswith("# Generated:"):
+        marker = body.rfind("##")
+        if marker < 0:
+            raise ValueError("Cboe calendar metadata delimiter is missing")
+        normalized = body[marker + 2:].lstrip("\r\n")
+    reader = csv.DictReader(io.StringIO(normalized))
     required = {"Holiday Name", "Date", "Regular Trading Hours"}
     if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
         raise ValueError("Cboe holiday CSV schema changed")
