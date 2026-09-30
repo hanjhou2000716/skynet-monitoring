@@ -2,11 +2,8 @@ name: Deploy React App to GitHub Pages
 on:
   repository_dispatch:
     types: [trigger_update]
-  # Primary updates at 06:40 / 14:45 Asia/Taipei, daily. Fallbacks at
-  # 07:40 / 15:45 are gated against the deployed status contract.
+  # External Cornjob is primary at 06:40 / 14:45 Asia/Taipei. These are backups.
   schedule:
-    - cron: "40 22 * * *"
-    - cron: "45 6 * * *"
     - cron: "40 23 * * *"
     - cron: "45 7 * * *"
   push:
@@ -19,7 +16,7 @@ permissions:
   id-token: write
 concurrency:
   group: "pages"
-  cancel-in-progress: false
+  queue: max
 jobs:
   gate:
     runs-on: ubuntu-latest
@@ -49,6 +46,9 @@ jobs:
     needs: gate
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.publish_gate.outputs.deploy }}
+      publish_reason: ${{ steps.publish_gate.outputs.reason }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -88,11 +88,19 @@ jobs:
         run: npm install
       - name: Build React App
         run: npm run build
+      - name: Prevent an older queued run from replacing newer Pages data
+        id: publish_gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: python deployment_gate.py public/status.json
       - name: Upload artifact
+        if: steps.publish_gate.outputs.deploy == 'true'
         uses: actions/upload-pages-artifact@v5.0.0
         with:
           path: ./build
   deploy:
+    if: needs.build.outputs.publish == 'true'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
