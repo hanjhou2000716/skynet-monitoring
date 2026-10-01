@@ -42,12 +42,31 @@ class SkynetPipelineTests(unittest.TestCase):
             "cboe": {"closedDates": [], "years": [2025, 2026]},
         }
 
+    def _history_resolver(self, symbol, period, timezone, expected, months, cache_dir):
+        import pandas as pd
+
+        frame = self._frames()[symbol].copy()
+        days = [value.date() if hasattr(value, "date") else value for value in frame.index]
+        selected = [day <= expected for day in days]
+        frame = frame.loc[selected].copy()
+        frame.index = pd.Index([day for day, keep in zip(days, selected) if keep], dtype=object)
+        latest = frame.index[-1]
+        current = latest == expected
+        return frame, {
+            "selectedSource": "fixture",
+            "sourceAttempts": 1, "sampleCount": len(frame), "latestSessionDate": latest.isoformat(),
+            "expectedSessionDate": expected.isoformat(), "status": "fresh" if current else "stale",
+            "reasonCode": "OK" if current else "SOURCE_LAGGING", "cacheUsed": False,
+        }
+
     def test_uses_last_completed_taiwan_close_before_daily_cutoff(self):
         frames = self._frames()
         now = dt.datetime(2026, 9, 29, 13, 0, tzinfo=TAIPEI)
         with patch("tg_bot_optimized.load_calendars", return_value=self._calendars()), \
              patch("tg_bot_optimized.yf.Ticker", side_effect=lambda symbol: FakeTicker(symbol, frames)):
-            values, sources, markets, calendar = market_snapshot(now)
+            values, sources, markets, calendar, instruments = market_snapshot(
+                now, history_resolver=self._history_resolver
+            )
         self.assertEqual(markets["taiwan"]["expectedSessionDate"], "2026-09-24")
         self.assertEqual(markets["taiwan"]["latestSessionDate"], "2026-09-24")
         self.assertEqual(markets["taiwan"]["status"], "fresh")
@@ -55,17 +74,64 @@ class SkynetPipelineTests(unittest.TestCase):
         self.assertTrue(all(value == "ok" for value in sources.values()))
         self.assertIsNotNone(values["ma200"])
         self.assertEqual(calendar["status"], "verified")
+        self.assertEqual(instruments["^TWII"]["latestSessionDate"], "2026-09-24")
+        self.assertEqual(instruments["006208"]["latestSessionDate"], "2026-09-24")
 
     def test_after_close_includes_current_day_only_when_present(self):
         frames = self._frames()
         now = dt.datetime(2026, 9, 29, 14, 30, tzinfo=TAIPEI)
         with patch("tg_bot_optimized.load_calendars", return_value=self._calendars()), \
              patch("tg_bot_optimized.yf.Ticker", side_effect=lambda symbol: FakeTicker(symbol, frames)):
-            _, sources, markets, _ = market_snapshot(now)
+            _, sources, markets, _, instruments = market_snapshot(
+                now, history_resolver=self._history_resolver
+            )
         self.assertEqual(markets["taiwan"]["expectedSessionDate"], "2026-09-29")
         self.assertEqual(markets["taiwan"]["latestSessionDate"], "2026-09-29")
         self.assertEqual(markets["taiwan"]["status"], "fresh")
         self.assertTrue(all(value == "ok" for value in sources.values()))
+        self.assertEqual(instruments["^TWII"]["latestSessionDate"], "2026-09-29")
+
+    def test_october_first_replay_identifies_lagging_006208_and_preserves_dates(self):
+        import pandas as pd
+
+        frames = self._frames()
+        twii = frames["^TWII"].copy()
+        twii.loc[pd.Timestamp("2026-09-30")] = 22000.0
+        frames["^TWII"] = twii.sort_index()
+        vix = frames["^VIX"].copy()
+        vix.loc[pd.Timestamp("2026-09-29")] = 18.0
+        vix.loc[pd.Timestamp("2026-09-30")] = 19.0
+        frames["^VIX"] = vix.sort_index()
+
+        def resolver(symbol, period, timezone, expected, months, cache_dir):
+            import pandas as pd
+
+            frame = frames[symbol].copy()
+            days = [value.date() if hasattr(value, "date") else value for value in frame.index]
+            selected = [day <= expected for day in days]
+            frame = frame.loc[selected].copy()
+            frame.index = pd.Index([day for day, keep in zip(days, selected) if keep], dtype=object)
+            latest = frame.index[-1]
+            is_current = latest == expected
+            return frame, {
+                "selectedSource": "TWSE", "sourceAttempts": 2, "sampleCount": len(frame),
+                "latestSessionDate": latest.isoformat(), "expectedSessionDate": expected.isoformat(),
+                "status": "fresh" if is_current else "stale",
+                "reasonCode": "OK" if is_current else "SOURCE_LAGGING", "cacheUsed": False,
+            }
+
+        now = dt.datetime(2026, 10, 1, 10, 22, tzinfo=TAIPEI)
+        with patch("tg_bot_optimized.load_calendars", return_value=self._calendars()):
+            _, sources, markets, _, instruments = market_snapshot(
+                now, history_resolver=resolver,
+            )
+        self.assertEqual(instruments["^TWII"]["latestSessionDate"], "2026-09-30")
+        self.assertEqual(instruments["006208"]["latestSessionDate"], "2026-09-29")
+        self.assertEqual(instruments["006208"]["expectedSessionDate"], "2026-09-30")
+        self.assertEqual(instruments["006208"]["status"], "stale")
+        self.assertEqual(instruments["006208"]["reasonCode"], "SOURCE_LAGGING")
+        self.assertEqual(markets["taiwan"]["status"], "stale")
+        self.assertEqual(sources["006208"], "stale")
 
     def test_yahoo_transport_timeout_retries_at_most_three_times(self):
         import pandas as pd
@@ -104,6 +170,27 @@ class SkynetPipelineTests(unittest.TestCase):
                 _fetch_market_history("^TWII", "400d")
         self.assertEqual(ticker.calls, 1)
 
+    def test_current_official_history_remains_healthy_when_yahoo_is_unavailable(self):
+        import pandas as pd
+
+        from tg_bot_optimized import _resolve_history
+
+        expected = dt.date(2026, 9, 30)
+        official = pd.DataFrame({
+            "Open": [100.0, 101.0], "High": [102.0, 103.0],
+            "Low": [99.0, 100.0], "Close": [101.0, 102.0],
+        }, index=pd.Index([dt.date(2026, 9, 29), expected], dtype=object))
+        with tempfile.TemporaryDirectory() as directory, \
+             patch("tg_bot_optimized.fetch_twse_history", return_value=(official, 2)), \
+             patch("tg_bot_optimized._history_for_completed_sessions", side_effect=TimeoutError("provider timeout")):
+            frame, diagnostic = _resolve_history(
+                "006208.TW", "400d", TAIPEI, expected, 14, directory,
+            )
+        self.assertEqual(frame.index[-1], expected)
+        self.assertEqual(diagnostic["status"], "fresh")
+        self.assertEqual(diagnostic["reasonCode"], "SECONDARY_UNAVAILABLE")
+        self.assertEqual(diagnostic["comparison"], "SECONDARY_UNAVAILABLE")
+
     def test_duplicate_or_non_finite_market_bars_fail_closed(self):
         import pandas as pd
 
@@ -136,7 +223,11 @@ class SkynetPipelineTests(unittest.TestCase):
         }
         calendar = {"status": "verified", "version": "fixture"}
         with tempfile.TemporaryDirectory() as directory, patch("tg_bot_optimized.market_snapshot",
-                return_value=(values, sources, markets, calendar)), patch.dict(
+                return_value=(values, sources, markets, calendar, {
+                    "^TWII": {"status": "fresh", "selectedSource": "TWSE"},
+                    "006208": {"status": "fresh", "selectedSource": "TWSE"},
+                    "^VIX": {"status": "fresh", "selectedSource": "Yahoo"},
+                })), patch.dict(
                     os.environ, {"TARGET_WINDOW": "morning", "TARGET_WINDOW_DATE": "2026-09-29",
                                  "GITHUB_SHA": "abc", "GITHUB_RUN_ID": "123"}, clear=False):
             previous = os.getcwd()

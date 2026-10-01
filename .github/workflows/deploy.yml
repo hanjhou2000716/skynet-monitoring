@@ -31,7 +31,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
         with:
-          python-version: '3.10'
+          python-version: '3.12.14'
       - name: Decide whether this window needs an update
         id: decision
         env:
@@ -55,11 +55,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7.0.0
         with:
-          python-version: '3.10'
+          python-version: '3.12.14'
       - name: Install Python Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install yfinance
+        run: python -m pip install --requirement requirements.lock
       - name: Restore validated official market calendar cache
         uses: actions/cache@v4
         with:
@@ -67,13 +65,31 @@ jobs:
           key: ${{ runner.os }}-skynet-calendar-v1-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ${{ runner.os }}-skynet-calendar-v1-
+      - name: Restore validated market history cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .market-cache
+          key: ${{ runner.os }}-skynet-market-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-skynet-market-v1-
       - name: Run Skynet tests
         run: python -m unittest discover -s tests -v
       - name: Run Skynet Python Core
+        id: core
         env:
           TARGET_WINDOW: ${{ needs.gate.outputs.window }}
           TARGET_WINDOW_DATE: ${{ needs.gate.outputs.window_date }}
         run: python tg_bot_optimized.py
+      - name: Gate validated market cache update
+        id: market_cache_gate
+        if: steps.core.outcome == 'success'
+        run: python market_cache_gate.py public/status.json
+      - name: Save validated market history cache
+        if: steps.core.outcome == 'success' && steps.market_cache_gate.outputs.eligible == 'true' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: .market-cache
+          key: ${{ runner.os }}-skynet-market-v1-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Verify generated dashboard data
         run: |
           test -s public/data.json
@@ -83,17 +99,57 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7.0.0
         with:
-          node-version: '18'
-      - name: Install Node Dependencies
-        run: npm install
-      - name: Build React App
+          node-version: '22.23.3'
+      - name: Restore compiled dashboard
+        id: static_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build
+          key: ${{ runner.os }}-skynet-pages-v1-${{ hashFiles('src/**', 'public/index.html', 'package.json', 'package-lock.json') }}
+      - name: Install locked Node dependencies
+        if: steps.static_cache.outputs.cache-hit != 'true'
+        run: npm ci
+      - name: Build dashboard when source changes
+        if: steps.static_cache.outputs.cache-hit != 'true'
         run: npm run build
+      - name: Cache compiled dashboard from main
+        if: steps.static_cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: build
+          key: ${{ runner.os }}-skynet-pages-v1-${{ hashFiles('src/**', 'public/index.html', 'package.json', 'package-lock.json') }}
+      - name: Insert this run's public market data
+        run: |
+          cp public/data.json build/data.json
+          cp public/status.json build/status.json
       - name: Prevent an older queued run from replacing newer Pages data
         id: publish_gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_SHA: ${{ github.sha }}
         run: python deployment_gate.py public/status.json
+      - name: Record Node version for diagnostics
+        id: node_version
+        if: always()
+        run: echo "version=$(node --version 2>/dev/null || echo not-installed)" >> "$GITHUB_OUTPUT"
+      - name: Write non-sensitive market diagnostic
+        if: always()
+        env:
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+          EXPECTED_COMMIT: ${{ github.sha }}
+          CORE_OUTCOME: ${{ steps.core.outcome }}
+          GATE_REASON: ${{ needs.gate.outputs.reason }}
+          PUBLICATION_REASON: ${{ steps.publish_gate.outputs.reason }}
+          NODE_VERSION: ${{ steps.node_version.outputs.version }}
+        run: python market_diagnostic.py public/status.json "$RUNNER_TEMP/skynet-market-diagnostic.json"
+      - name: Upload market diagnostic
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: skynet-market-diagnostic
+          path: ${{ runner.temp }}/skynet-market-diagnostic.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Upload artifact
         if: steps.publish_gate.outputs.deploy == 'true'
         uses: actions/upload-pages-artifact@v5.0.0

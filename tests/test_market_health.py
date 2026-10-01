@@ -9,6 +9,8 @@ from unittest.mock import patch
 from market_health import (
     CalendarUnavailable,
     TAIPEI,
+    TAIPEI_CLOSURE_HISTORY_URL,
+    TAIPEI_EOC_URL,
     TWSE_URL,
     _request_text,
     expected_taiwan_session,
@@ -16,6 +18,8 @@ from market_health import (
     load_calendars,
     market_contract,
     parse_cboe_calendar,
+    parse_taipei_closure_history,
+    parse_taipei_eoc_closures,
     parse_twse_calendar,
     taiwan_next_due,
 )
@@ -33,6 +37,23 @@ CBOE_FIXTURE = """Holiday Name,Date,Regular Trading Hours,Global Trading Hours
 New Year's Day,2026-01-01,None,None
 Good Friday,2026-04-03,None,None
 Early Close,2026-11-27,9:30 a.m. - 1:00 p.m. ET,Open
+"""
+EOC_FIXTURE = """
+<table><tr><th>#</th><th>發布時間</th><th>發布單位</th><th>標題</th></tr>
+<tr><td>1</td><td>2026/07/09 20:00</td><td>臺北市政府秘書處媒體事務組</td>
+<td><a href="/News/Detail/909">臺北市明（7/10）日停止上班及上課</a></td></tr></table>
+"""
+EOC_CANCELLATION_FIXTURE = """
+<table><tr><th>#</th><th>發布時間</th><th>發布單位</th><th>標題</th></tr>
+<tr><td>1</td><td>2026/07/09 22:00</td><td>臺北市政府秘書處媒體事務組</td>
+<td><a href="/News/Detail/910">臺北市明（7/10）日照常上班及上課</a></td></tr></table>
+"""
+TAIPEI_HISTORY_FIXTURE = """
+<table><tr><th>年</th><th>天然災害名稱</th><th>停止上班上課情形</th><th>備註</th></tr>
+<tr><td>115</td><td>巴威颱風</td><td>7月10日停止上班及上課。</td><td></td></tr>
+<tr><td>7月11日停止上班及上課。</td></tr>
+<tr><td>7月12日照常上班及上課。</td></tr>
+<tr><td>臺北市山區少數學校停止上班及上課。</td></tr></table>
 """
 
 
@@ -56,6 +77,69 @@ class MarketCalendarTests(unittest.TestCase):
         strict_flag = getattr(ssl, "VERIFY_X509_STRICT", 0)
         if strict_flag:
             self.assertEqual(context.verify_flags & strict_flag, 0)
+
+    def test_taipei_gov_sources_relax_only_strict_profile(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b"verified calendar"
+
+        for url in (TAIPEI_EOC_URL, TAIPEI_CLOSURE_HISTORY_URL):
+            with self.subTest(url=url), patch("market_health.urlopen", return_value=Response()) as open_url:
+                self.assertEqual(_request_text(url), "verified calendar")
+            context = open_url.call_args.kwargs["context"]
+            self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+            self.assertTrue(context.check_hostname)
+
+    def test_taipei_eoc_announced_full_day_closure(self):
+        now = dt.datetime(2026, 7, 10, 7, 0, tzinfo=TAIPEI)
+        records = parse_taipei_eoc_closures(EOC_FIXTURE, now)
+        self.assertEqual([record["date"] for record in records], ["2026-07-10"])
+        self.assertEqual(records[0]["source"], "TAIPEI_EOC_OFFICIAL_ANNOUNCEMENT")
+        self.assertIn("/News/Detail/909", records[0]["evidenceId"])
+
+    def test_taipei_eoc_normal_work_announcement_cancels_cached_closure(self):
+        now = dt.datetime(2026, 7, 10, 7, 0, tzinfo=TAIPEI)
+        records = parse_taipei_eoc_closures(EOC_CANCELLATION_FIXTURE, now)
+        self.assertEqual([record["date"] for record in records], ["2026-07-10"])
+        self.assertEqual(records[0]["state"], "cancelled")
+
+    def test_taipei_eoc_partial_day_announcement_is_not_full_market_closure(self):
+        partial = EOC_FIXTURE.replace("明（7/10）日停止上班及上課", "明（7/10）日上午停止上班及上課")
+        records = parse_taipei_eoc_closures(
+            partial, dt.datetime(2026, 7, 10, 7, 0, tzinfo=TAIPEI),
+        )
+        self.assertEqual(records, [])
+
+    def test_taipei_exception_sources_fail_closed_when_page_schema_changes(self):
+        with self.assertRaisesRegex(ValueError, "EOC news schema"):
+            parse_taipei_eoc_closures("<html><body>temporarily unavailable</body></html>")
+        with self.assertRaisesRegex(ValueError, "HR closure history schema"):
+            parse_taipei_closure_history("<html><body>temporarily unavailable</body></html>")
+
+    def test_taipei_hr_history_records_citywide_closure_not_local_school(self):
+        now = dt.datetime(2026, 10, 1, 12, 0, tzinfo=TAIPEI)
+        records = parse_taipei_closure_history(TAIPEI_HISTORY_FIXTURE, now)
+        self.assertEqual([record["date"] for record in records], ["2026-07-10", "2026-07-11"])
+        self.assertTrue(all(record["source"] == "TAIPEI_HR_OFFICIAL_HISTORY" for record in records))
+
+    def test_loaded_official_closures_skip_unlisted_typhoon_session(self):
+        now = dt.datetime(2026, 10, 1, 12, 0, tzinfo=TAIPEI)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("market_health._request_text", side_effect=[
+                TWSE_FIXTURE, CBOE_FIXTURE, EOC_FIXTURE, TAIPEI_HISTORY_FIXTURE,
+            ]):
+                calendars = load_calendars(now, directory)
+        self.assertIn("2026-07-10", calendars["twse"]["closedDates"])
+        self.assertTrue(any(
+            item["date"] == "2026-07-10" and item["source"] == "TAIPEI_HR_OFFICIAL_HISTORY"
+            for item in calendars["specialClosures"]
+        ))
 
     def test_twse_calendar_identifies_closures_and_open_special_dates(self):
         parsed = parse_twse_calendar(TWSE_FIXTURE)
@@ -109,7 +193,7 @@ class MarketCalendarTests(unittest.TestCase):
     def test_cached_calendar_is_used_only_inside_24_hour_window(self):
         now = dt.datetime(2026, 9, 29, 7, 0, tzinfo=TAIPEI)
         with tempfile.TemporaryDirectory() as directory:
-            with patch("market_health._request_text", side_effect=[TWSE_FIXTURE, CBOE_FIXTURE]):
+            with patch("market_health._request_text", side_effect=[TWSE_FIXTURE, CBOE_FIXTURE, EOC_FIXTURE, TAIPEI_HISTORY_FIXTURE]):
                 first = load_calendars(now, directory)
             self.assertFalse(first["cacheUsed"])
             with patch("market_health._request_text", side_effect=RuntimeError("offline")):
@@ -122,7 +206,7 @@ class MarketCalendarTests(unittest.TestCase):
     def test_corrupt_calendar_cache_is_rejected(self):
         now = dt.datetime(2026, 9, 29, 7, 0, tzinfo=TAIPEI)
         with tempfile.TemporaryDirectory() as directory:
-            with patch("market_health._request_text", side_effect=[TWSE_FIXTURE, CBOE_FIXTURE]):
+            with patch("market_health._request_text", side_effect=[TWSE_FIXTURE, CBOE_FIXTURE, EOC_FIXTURE, TAIPEI_HISTORY_FIXTURE]):
                 load_calendars(now, directory)
             path = os.path.join(directory, "market-calendar.json")
             with open(path, encoding="utf-8") as file:

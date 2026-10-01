@@ -3,6 +3,7 @@
 import csv
 import datetime as dt
 import hashlib
+import html
 import html.parser
 import io
 import json
@@ -18,10 +19,21 @@ from zoneinfo import ZoneInfo
 TAIPEI = ZoneInfo("Asia/Taipei")
 NEW_YORK = ZoneInfo("America/New_York")
 UTC = dt.timezone.utc
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 CALENDAR_TTL = dt.timedelta(hours=24)
 TWSE_URL = "https://www.twse.com.tw/holidaySchedule/holidaySchedule?response=html"
 CBOE_URL = "https://www.cboe.com/us/options/holidays/csv/"
+TAIPEI_EOC_URL = "https://eoc.gov.taipei/News?MenuId=51"
+TAIPEI_CLOSURE_HISTORY_URL = "https://dop.gov.taipei/cp.aspx?n=EFE42F770DFD63FB"
+KNOWN_VERIFIED_TAIWAN_EXCEPTIONAL_CLOSURES = (
+    {
+        "date": "2026-07-10",
+        "state": "closed",
+        "source": "TAIPEI_EOC_OFFICIAL_ANNOUNCEMENT",
+        "evidenceId": "https://eoc.gov.taipei/News/Detail/909",
+        "updatedAt": "2026-07-09T20:00:00+08:00",
+    },
+)
 
 
 class CalendarUnavailable(ValueError):
@@ -55,13 +67,16 @@ class _TableRows(html.parser.HTMLParser):
             self.row = None
 
 
-def _request_text(url):
+def _request_text(url, deadline=None):
     last_error = None
     for attempt in range(3):
         try:
+            remaining = deadline - time.monotonic() if deadline is not None else 12
+            if remaining <= 0:
+                raise TimeoutError("market acquisition deadline exceeded")
             request = Request(url, headers={"User-Agent": "SkynetMarketHealth/1.0"})
-            request_options = {"timeout": 12}
-            if url == TWSE_URL:
+            request_options = {"timeout": min(12, remaining)}
+            if url in (TWSE_URL, TAIPEI_EOC_URL, TAIPEI_CLOSURE_HISTORY_URL):
                 context = ssl.create_default_context()
                 strict_flag = getattr(ssl, "VERIFY_X509_STRICT", 0)
                 if strict_flag:
@@ -79,7 +94,13 @@ def _request_text(url):
         except (TimeoutError, URLError, OSError) as error:
             last_error = error
         if attempt < 2:
-            time.sleep(0.25 * (2 ** attempt))
+            delay = 0.25 * (2 ** attempt)
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                delay = min(delay, remaining)
+            time.sleep(delay)
     raise RuntimeError(f"official calendar request failed ({type(last_error).__name__})")
 
 
@@ -145,12 +166,176 @@ def _checked_at(now):
     return now.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def _parsed_calendar_hash(twse, cboe):
-    content = json.dumps({"twse": twse, "cboe": cboe}, sort_keys=True, separators=(",", ":"))
+def _parsed_calendar_hash(twse, cboe, special_closures):
+    content = json.dumps(
+        {"twse": twse, "cboe": cboe, "specialClosures": special_closures},
+        sort_keys=True, separators=(",", ":"),
+    )
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def _valid_cached_calendar(path, now):
+class _StructuredRows(html.parser.HTMLParser):
+    """Keep official table cell boundaries and link targets while parsing HTML."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows = []
+        self.row = None
+        self.cell = None
+        self.active_link = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "tr":
+            self.row = []
+        elif tag in ("td", "th") and self.row is not None:
+            self.cell = {"text": [], "links": []}
+        elif tag == "a" and self.cell is not None:
+            self.active_link = {"href": attrs.get("href", ""), "text": []}
+        elif tag in ("br", "p", "li") and self.cell is not None:
+            self.cell["text"].append("\n")
+
+    def handle_data(self, data):
+        if self.cell is not None:
+            self.cell["text"].append(data)
+            if self.active_link is not None:
+                self.active_link["text"].append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.active_link is not None:
+            self.cell["links"].append({
+                "href": self.active_link["href"],
+                "text": " ".join(" ".join(self.active_link["text"]).split()),
+            })
+            self.active_link = None
+        elif tag in ("td", "th") and self.row is not None and self.cell is not None:
+            lines = [" ".join(line.split()) for line in "".join(self.cell["text"]).splitlines()]
+            self.row.append({"text": "\n".join(line for line in lines if line), "links": self.cell["links"]})
+            self.cell = None
+        elif tag == "tr" and self.row is not None:
+            if self.row:
+                self.rows.append(self.row)
+            self.row = None
+
+
+def _closure_record(day, source, evidence_id, updated_at, state="closed"):
+    return {
+        "date": day.isoformat(),
+        "state": state,
+        "source": source,
+        "evidenceId": evidence_id,
+        "updatedAt": updated_at.isoformat(),
+    }
+
+
+def _roc_year(value):
+    try:
+        year = int(value)
+    except (TypeError, ValueError):
+        return None
+    return year + 1911 if 1 <= year <= 300 else (year if year >= 1911 else None)
+
+
+def parse_taipei_closure_history(body, now=None):
+    """Read the Taipei HR Department's dated official history of full-day closures."""
+    now = now or dt.datetime.now(TAIPEI)
+    parser = _StructuredRows()
+    parser.feed(body)
+    headers = [" ".join(cell["text"].split()) for row in parser.rows for cell in row]
+    if not any(value == "年" for value in headers) or not any("天然災害名稱" in value for value in headers) or not any("停止上班上課情形" in value for value in headers):
+        raise ValueError("Taipei HR closure history schema changed")
+    records = []
+    current_year = None
+    current_event = ""
+    for row in parser.rows:
+        year = _roc_year(row[0]["text"].strip()) if row else None
+        if year is not None and len(row) >= 3:
+            current_year = year
+            current_event = row[1]["text"].strip()
+            description = row[2]["text"]
+        elif current_year is not None:
+            description = "\n".join(cell["text"] for cell in row if cell["text"])
+        else:
+            continue
+        evidence = f"{current_year}:{current_event}"[:160]
+        for match in re.finditer(r"(?:^|\n)\s*(\d{1,2})月\s*(\d{1,2})日\s*停止上班及上課[。.]?", description):
+            try:
+                day = dt.date(current_year, int(match.group(1)), int(match.group(2)))
+            except ValueError:
+                continue
+            if day <= now.date() and day >= now.date() - dt.timedelta(days=450):
+                records.append(_closure_record(day, "TAIPEI_HR_OFFICIAL_HISTORY", evidence, now))
+    return records
+
+
+def _date_from_eoc_title(title, published_at):
+    full = re.search(r"(?<!\d)(20\d{2})[./-](\d{1,2})[./-](\d{1,2})(?!\d)", title)
+    if full:
+        try:
+            return dt.date(*(int(part) for part in full.groups()))
+        except ValueError:
+            return None
+    roc = re.search(r"(?<!\d)(1\d{2})年\s*(\d{1,2})月\s*(\d{1,2})日", title)
+    if roc:
+        try:
+            return dt.date(int(roc.group(1)) + 1911, int(roc.group(2)), int(roc.group(3)))
+        except ValueError:
+            return None
+    short = re.search(r"(?:明|今|今日|明日)?[（(]?\s*(\d{1,2})\s*/\s*(\d{1,2})\s*[）)]?", title)
+    if short:
+        month, day = int(short.group(1)), int(short.group(2))
+        try:
+            candidates = [dt.date(published_at.year + delta, month, day) for delta in (-1, 0, 1)]
+        except ValueError:
+            return None
+        return min(candidates, key=lambda value: abs((value - published_at.date()).days))
+    if any(token in title for token in ("明（明日）", "明日", "明（")):
+        return published_at.date() + dt.timedelta(days=1)
+    if any(token in title for token in ("今（今日）", "今天", "今日")):
+        return published_at.date()
+    return None
+
+
+def parse_taipei_eoc_closures(body, now=None):
+    """Read explicit citywide full-day closure announcements from Taipei EOC news."""
+    now = now or dt.datetime.now(TAIPEI)
+    parser = _StructuredRows()
+    parser.feed(body)
+    headers = [" ".join(cell["text"].split()) for row in parser.rows for cell in row]
+    if not any(value in ("發布時間", "發佈時間") for value in headers) or not any(value in ("發布單位", "發佈單位") for value in headers) or not any(value == "標題" for value in headers):
+        raise ValueError("Taipei EOC news schema changed")
+    records = []
+    for row in parser.rows:
+        if len(row) < 4:
+            continue
+        published_text = row[1]["text"].strip()
+        publisher = row[2]["text"].strip()
+        title_cell = row[-1]
+        title = title_cell["text"].strip()
+        if not title or not ("臺北市" in title or "台北市" in title):
+            continue
+        is_closure = "停止上班及上課" in title
+        is_cancel = "照常上班及上課" in title or "取消" in title
+        if not (is_closure or is_cancel):
+            continue
+        if any(token in title for token in ("上午", "下午", "半日", "部分")):
+            continue
+        if "秘書處" not in publisher and "市政府" not in publisher:
+            continue
+        try:
+            published_at = dt.datetime.strptime(published_text, "%Y/%m/%d %H:%M").replace(tzinfo=TAIPEI)
+        except ValueError:
+            continue
+        target_day = _date_from_eoc_title(title, published_at)
+        if target_day is None or target_day < now.date() - dt.timedelta(days=7) or target_day > now.date() + dt.timedelta(days=7):
+            continue
+        evidence_id = next((link["href"] for link in title_cell["links"] if link["href"]), title[:120])
+        state = "cancelled" if is_cancel else "closed"
+        records.append(_closure_record(target_day, "TAIPEI_EOC_OFFICIAL_ANNOUNCEMENT", evidence_id, published_at, state))
+    return records
+
+
+def _verified_cached_calendar(path):
     try:
         with open(path, encoding="utf-8") as file:
             cached = json.load(file)
@@ -158,10 +343,23 @@ def _valid_cached_calendar(path, now):
             return None
         twse = cached.get("twse")
         cboe = cached.get("cboe")
-        if not isinstance(twse, dict) or not isinstance(cboe, dict):
+        special = cached.get("specialClosures")
+        if not isinstance(twse, dict) or not isinstance(cboe, dict) or not isinstance(special, list):
             return None
-        if cached.get("contentHash") != _parsed_calendar_hash(twse, cboe):
+        if cached.get("contentHash") != _parsed_calendar_hash(twse, cboe, special):
             return None
+        return cached
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def _valid_cached_calendar(path, now):
+    try:
+        cached = _verified_cached_calendar(path)
+        if cached is None:
+            return None
+        twse = cached.get("twse")
+        cboe = cached.get("cboe")
         for source in (twse, cboe):
             if not isinstance(source.get("years"), list) or not isinstance(source.get("closedDates"), list):
                 return None
@@ -180,24 +378,47 @@ def _valid_cached_calendar(path, now):
         return None
 
 
-def load_calendars(now=None, cache_dir=".calendar-cache"):
+def load_calendars(now=None, cache_dir=".calendar-cache", deadline=None):
     now = now or dt.datetime.now(TAIPEI)
     cache_path = os.path.join(cache_dir, "market-calendar.json")
+    prior = _verified_cached_calendar(cache_path)
     try:
-        twse_text = _request_text(TWSE_URL)
-        cboe_text = _request_text(CBOE_URL)
+        twse_text = _request_text(TWSE_URL, deadline) if deadline is not None else _request_text(TWSE_URL)
+        cboe_text = _request_text(CBOE_URL, deadline) if deadline is not None else _request_text(CBOE_URL)
+        eoc_text = _request_text(TAIPEI_EOC_URL, deadline) if deadline is not None else _request_text(TAIPEI_EOC_URL)
         twse = parse_twse_calendar(twse_text)
         cboe = parse_cboe_calendar(cboe_text)
         if now.year not in twse["years"] or now.year not in cboe["years"]:
             raise ValueError("official calendars do not cover the current year")
-        evidence = (twse_text + "\n" + cboe_text).encode("utf-8")
+        prior_records = prior.get("specialClosures", []) if prior else []
+        by_date = {item["date"]: item for item in KNOWN_VERIFIED_TAIWAN_EXCEPTIONAL_CLOSURES}
+        for item in prior_records:
+            by_date[item["date"]] = item
+        try:
+            history_text = _request_text(TAIPEI_CLOSURE_HISTORY_URL, deadline) if deadline is not None else _request_text(TAIPEI_CLOSURE_HISTORY_URL)
+        except RuntimeError:
+            if prior is None:
+                raise
+            history_text = ""
+        for item in parse_taipei_closure_history(history_text, now):
+            by_date[item["date"]] = item
+        for item in parse_taipei_eoc_closures(eoc_text, now):
+            by_date[item["date"]] = item
+        special_closures = sorted(by_date.values(), key=lambda item: (item["date"], item["updatedAt"]))
+        active_special_dates = {
+            item["date"] for item in special_closures if item["state"] == "closed"
+        }
+        twse["closedDates"] = sorted(set(twse["closedDates"]) | active_special_dates)
+        evidence = (twse_text + "\n" + cboe_text + "\n" + eoc_text + "\n" + history_text).encode("utf-8")
         calendars = {
             "schemaVersion": SCHEMA_VERSION,
             "checkedAt": _checked_at(now),
             "sha256": hashlib.sha256(evidence).hexdigest(),
-            "contentHash": _parsed_calendar_hash(twse, cboe),
+            "contentHash": _parsed_calendar_hash(twse, cboe, special_closures),
             "twse": twse,
             "cboe": cboe,
+            "specialClosures": special_closures,
+            "temporaryClosureSource": "Taipei City EOC announcements + HR Department official history",
         }
         os.makedirs(cache_dir, exist_ok=True)
         with open(cache_path, "w", encoding="utf-8") as file:
@@ -307,6 +528,14 @@ def build_calendar_contract(calendars):
         "version": calendars["sha256"][:16],
         "checkedAt": checked_at,
         "cacheUsed": bool(calendars.get("cacheUsed")),
-        "twse": {"source": "TWSE", "checkedAt": checked_at, "coverageThrough": through(calendars["twse"])},
+        "twse": {
+            "source": "TWSE",
+            "checkedAt": checked_at,
+            "coverageThrough": through(calendars["twse"]),
+            "temporaryClosureSource": calendars.get("temporaryClosureSource", "unverified"),
+            "temporaryClosureCount": sum(
+                item.get("state") == "closed" for item in calendars.get("specialClosures", [])
+            ),
+        },
         "cboe": {"source": "Cboe", "checkedAt": checked_at, "coverageThrough": through(calendars["cboe"])},
     }

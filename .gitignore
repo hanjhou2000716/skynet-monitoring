@@ -2,3 +2,5 @@ node_modules/
 build/
 __pycache__/
 *.py[cod]
+.market-cache/
+.calendar-cache/
