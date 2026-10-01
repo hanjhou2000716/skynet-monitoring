@@ -45,7 +45,7 @@ const App = () => {
   const [peak006208, setPeak006208] = useState(null);
   const [current006208, setCurrent006208] = useState(null);
   const [lastUpdated, setLastUpdated] = useState("");
-  const [marketMeta, setMarketMeta] = useState({ taiwan: {}, us: {} });
+  const [marketMeta, setMarketMeta] = useState({ taiwan: {}, us: {}, instruments: {} });
   const [dataState, setDataState] = useState("loading");
   const [dataError, setDataError] = useState("");
 
@@ -87,12 +87,32 @@ const App = () => {
         setMarketMeta({
           taiwan: markets.taiwan || {},
           us: markets.us || {},
+          instruments: json.instruments || {},
           calendar: json.calendar || {},
         });
         setIsLoaded(true);
         setDataState(healthy ? "ready" : "degraded");
+        const instruments = json.instruments && typeof json.instruments === "object"
+          ? Object.entries(json.instruments) : [];
+        const instrumentProblems = instruments
+          .filter(([, instrument]) => !instrument ||
+            !["fresh", "market_closed"].includes(instrument.status) ||
+            instrument.latestSessionDate !== instrument.expectedSessionDate)
+          .map(([symbol, instrument]) => {
+            const details = instrument || {};
+            return `${symbol} 實際 ${details.latestSessionDate || "—"}，應有 ${details.expectedSessionDate || "—"}（${details.reasonCode || "SOURCE_UNAVAILABLE"}）`;
+          });
+        const hasInstrumentProblem = (marketIndex) => instruments.some(([symbol, instrument]) => {
+          const matchesMarket = marketIndex === 0
+            ? ["^TWII", "006208"].includes(symbol)
+            : symbol.toUpperCase().includes("VIX");
+          return matchesMarket && (!instrument ||
+            !["fresh", "market_closed"].includes(instrument.status) ||
+            instrument.latestSessionDate !== instrument.expectedSessionDate);
+        });
         const causes = [markets.taiwan, markets.us]
-          .filter((market) => market && !marketFresh(market))
+          .filter((market, index) => market && !marketFresh(market) &&
+            !hasInstrumentProblem(index))
           .map((market) => {
             const code = market.reasonCode || market.status;
             const labels = {
@@ -103,10 +123,11 @@ const App = () => {
             };
             return labels[code] || "行情狀態待確認";
           });
+        causes.push(...instrumentProblems);
         if (json.calendar?.status !== "verified") causes.push("交易日曆待確認");
         if (!sourceValuesOkay) causes.push("必要行情來源不完整");
         if (!valuesOkay) causes.push("計算所需資料不足");
-        setDataError(healthy ? "" : Array.from(new Set(causes)).join("；") || "資料契約版本待確認，暫停操作建議。");
+        setDataError(healthy ? "" : Array.from(new Set(causes)).join("\n") || "資料契約版本待確認，暫停操作建議。");
         setIsFetching(false);
       })
       .catch(err => {
@@ -239,7 +260,7 @@ const App = () => {
                   ? "PROTOCOL ACTIVATED: 無情退場協議啟動"
                   : "SYSTEM SAFE: 監控系統安全"}
               </h2>
-              <p className="text-slate-300 mt-1">
+              <p className="text-slate-300 mt-1 whitespace-pre-line break-words">
                 {dataState !== "ready" ? (dataError || "必要行情或日曆資料不完整，暫停依據本頁產生操作建議。") : isProtocolTriggered
                   ? "⚠️ 警告：已觸發系統性風險指標！請立即啟動降槓桿程序，清算衛星部位 (00685L)，回歸 100% 核心原型資產。"
                   : "✅ 目前市場雜訊在容許範圍內，維持現有槓桿配置，持續享有逆價差與曝險增益。"}
