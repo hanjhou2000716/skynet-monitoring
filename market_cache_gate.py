@@ -29,8 +29,12 @@ def is_cache_eligible(payload):
             return False
         if not instrument.get("latestSessionDate") or instrument.get("latestSessionDate") != instrument.get("expectedSessionDate"):
             return False
+    # status.json flattens dataQuality into its top-level contract. Keep
+    # compatibility with internal payloads that still nest the source map.
     quality = payload.get("dataQuality")
     sources = quality.get("sources") if isinstance(quality, dict) else None
+    if sources is None:
+        sources = payload.get("sources")
     return isinstance(sources, dict) and bool(sources) and all(value == "ok" for value in sources.values())
 
 

@@ -16,11 +16,21 @@ class MarketCacheGateTests(unittest.TestCase):
                 "^TWII": {"status": "fresh", "latestSessionDate": "2026-09-30", "expectedSessionDate": "2026-09-30", "reasonCode": "OK"},
                 "006208": {"status": "fresh", "latestSessionDate": "2026-09-30", "expectedSessionDate": "2026-09-30", "reasonCode": "SECONDARY_LAGGING"},
             },
-            "dataQuality": {"sources": {"taiex": "ok", "006208": "ok", "vix": "ok"}},
+            "sources": {"taiex": "ok", "006208": "ok", "vix": "ok"},
         }
 
     def test_only_fully_verified_current_market_snapshot_can_refresh_cache(self):
         self.assertTrue(is_cache_eligible(self._healthy_payload()))
+
+    def test_internal_nested_source_contract_remains_compatible(self):
+        nested = self._healthy_payload()
+        nested["dataQuality"] = {"sources": nested.pop("sources")}
+        self.assertTrue(is_cache_eligible(nested))
+
+    def test_failed_source_cannot_refresh_cache(self):
+        failed = self._healthy_payload()
+        failed["sources"]["006208"] = "stale"
+        self.assertFalse(is_cache_eligible(failed))
 
     def test_degraded_or_conflicted_snapshot_cannot_refresh_cache(self):
         degraded = self._healthy_payload()
