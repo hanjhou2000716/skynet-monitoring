@@ -18,7 +18,16 @@ def _instrument_summary(value):
         return {"status": "missing"}
     keys = ("selectedSource", "sourceAttempts", "sampleCount", "latestSessionDate",
             "expectedSessionDate", "status", "reasonCode", "comparison", "cacheUsed")
-    return {key: value.get(key) for key in keys}
+    summary = {key: value.get(key) for key in keys}
+    summary["cacheStatus"] = value.get("cacheStatus")
+    source_results = value.get("sourceResults")
+    if isinstance(source_results, dict):
+        summary["sourceResults"] = {
+            source: {key: result.get(key) for key in
+                     ("status", "reasonCode", "errorType", "attempts", "latestSessionDate", "durationMs")}
+            for source, result in source_results.items() if isinstance(result, dict)
+        }
+    return summary
 
 
 def summarize(payload, expected_run_id=None, expected_commit=None, core_outcome=None,

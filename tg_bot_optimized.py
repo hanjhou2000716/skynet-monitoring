@@ -12,6 +12,7 @@ import math
 import os
 import time
 from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor
 
 import yfinance as yf
 from market_data import (
@@ -32,6 +33,41 @@ from market_health import (
 
 TAIPEI = ZoneInfo("Asia/Taipei")
 NEW_YORK = ZoneInfo("America/New_York")
+MARKET_CACHE_KEYS = {"^TWII": "TWII", "006208.TW": "006208", "^VIX": "VIX"}
+
+
+def _market_cache_paths(symbol, cache_dir):
+    import os
+
+    canonical = MARKET_CACHE_KEYS.get(symbol, symbol.replace("^", ""))
+    names = [canonical + ".json"]
+    legacy = symbol.replace("^", "") + ".json"
+    if legacy not in names:
+        names.append(legacy)
+    return [os.path.join(cache_dir, name) for name in names]
+
+
+def _verified_market_cache(symbol, expected_day, cache_dir):
+    minimum = 200 if symbol == "^TWII" else 100 if symbol == "006208.TW" else 2
+    paths = _market_cache_paths(symbol, cache_dir)
+    valid = []
+    for path in paths:
+        frame = validated_cache(path, expected_day, minimum)
+        if frame is not None:
+            valid.append((path, frame))
+    if len(valid) > 1 and compare_sources(valid[0][1], valid[1][1]) == "SOURCE_CONFLICT":
+        return None, paths[0], None, "CONFLICT"
+    if valid:
+        path, frame = valid[0]
+        migrated = path != paths[0]
+        if migrated:
+            saved = save_validated_cache(paths[0], frame, frame.attrs.get("cacheSource", "TWSE"),
+                                         frame.attrs.get("cacheVerifiedAt"))
+            if not saved:
+                return None, paths[0], None, "MIGRATION_FAILED"
+        source = frame.attrs.get("cacheSource", "TWSE" if symbol != "^VIX" else "Yahoo")
+        return frame, paths[0], source, "MIGRATED" if migrated else "VALID"
+    return None, paths[0], None, "MISSING_OR_INVALID"
 
 
 def _session_day(value):
@@ -143,9 +179,24 @@ def consecutive_true(values):
     return count
 
 
+def _source_error_reason(error):
+    """Normalize provider exceptions to stable, non-sensitive reason codes."""
+    reason = getattr(error, "reason_code", None)
+    if reason:
+        return str(reason)
+    if isinstance(error, TimeoutError) or "timeout" in type(error).__name__.lower():
+        return "SOURCE_TIMEOUT"
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    if isinstance(status, int):
+        return f"SOURCE_HTTP_{status}"
+    if isinstance(error, (ValueError, TypeError, KeyError)):
+        return "SOURCE_RESPONSE_INVALID"
+    return "SOURCE_UNAVAILABLE"
+
+
 def _failed_source(error):
     # Diagnostics are intentionally categorical; do not publish provider payloads.
-    return f"unavailable:{type(error).__name__}"
+    return f"unavailable:{_source_error_reason(error)}"
 
 
 def _instrument_failure(existing, error, expected_date):
@@ -167,6 +218,11 @@ def _instrument_failure(existing, error, expected_date):
     details.setdefault("sourceAttempts", getattr(error, "attempts", 0))
     details.setdefault("sampleCount", 0)
     details.setdefault("latestSessionDate", None)
+    source_results = getattr(error, "source_results", None)
+    if source_results:
+        details["sourceResults"] = source_results
+    if getattr(error, "cache_status", None):
+        details["cacheStatus"] = error.cache_status
     return details
 
 
@@ -175,38 +231,63 @@ def _resolve_history(symbol, period, timezone, expected_date, lookback_months, c
     import os
 
     expected_day = expected_date.date() if isinstance(expected_date, datetime.datetime) else expected_date
-    cache_path = os.path.join(cache_dir, symbol.replace("^", "") + ".json")
+    cached_history, cache_path, cached_source, cache_status = _verified_market_cache(symbol, expected_day, cache_dir)
     attempts = 0
     official_error = None
+    official_result = {"status": "PENDING"}
     official = None
     yahoo = None
     comparison = "NO_COMMON_SESSION"
+    official_started = time.monotonic()
     try:
         official, official_attempts = fetch_twse_history(
             symbol, expected_day, lookback_months, deadline=budget_deadline,
         )
         official = _trim_history_period(official, expected_day, period)
         attempts += official_attempts
+        official_result = {"status": "AVAILABLE", "attempts": official_attempts,
+                           "latestSessionDate": _session_day(official.index[-1]).isoformat(),
+                           "durationMs": round((time.monotonic() - official_started) * 1000)}
     except Exception as error:
         official_error = error
         attempts += getattr(error, "attempts", 1)
+        official_result = {"status": "UNAVAILABLE", "reasonCode": _source_error_reason(error),
+                           "errorType": type(error).__name__, "attempts": getattr(error, "attempts", 1),
+                           "durationMs": round((time.monotonic() - official_started) * 1000)}
 
+    yahoo_started = time.monotonic()
     try:
         yahoo = _history_for_completed_sessions(symbol, period, timezone, expected_day, budget_deadline)
         yahoo = _trim_history_period(yahoo, expected_day, period)
         yahoo_attempts = yahoo.attrs.get("sourceAttempts", 1)
+        yahoo_result = {"status": "AVAILABLE", "attempts": yahoo_attempts,
+                        "latestSessionDate": _session_day(yahoo.index[-1]).isoformat(),
+                        "durationMs": round((time.monotonic() - yahoo_started) * 1000)}
     except Exception as error:
         yahoo_attempts = getattr(error, "attempts", 1)
         attempts += yahoo_attempts
         yahoo_error = error
+        yahoo_result = {"status": "UNAVAILABLE", "reasonCode": _source_error_reason(error),
+                        "errorType": type(error).__name__, "attempts": yahoo_attempts,
+                        "durationMs": round((time.monotonic() - yahoo_started) * 1000)}
     else:
         attempts += yahoo_attempts
         yahoo_error = None
+
+    source_results = {"TWSE": official_result, "Yahoo": yahoo_result}
 
     if official is not None and yahoo is not None:
         comparison = compare_sources(official, yahoo)
         if comparison == "SOURCE_CONFLICT":
             chosen, source, reason, status, cache_used = official, "TWSE", "SOURCE_CONFLICT", "unavailable", False
+            return chosen, {
+                "selectedSource": source, "sourceAttempts": attempts,
+                "sampleCount": len(chosen), "comparison": comparison,
+                "latestSessionDate": _session_day(chosen.index[-1]).isoformat(),
+                "expectedSessionDate": expected_day.isoformat(), "cacheUsed": False,
+                "status": status, "reasonCode": reason, "sourceResults": source_results,
+                "cacheStatus": "CONFLICT_BLOCKED" if cache_status == "CONFLICT" or cached_history is not None else "NOT_USED",
+            }
         elif _session_day(official.index[-1]) == expected_day:
             chosen, source, cache_used = official, "TWSE", False
             reason = "SECONDARY_LAGGING" if comparison == "SECONDARY_LAGGING" else (
@@ -221,7 +302,7 @@ def _resolve_history(symbol, period, timezone, expected_date, lookback_months, c
             chosen, source, reason, status, cache_used = official, "TWSE", "SOURCE_LAGGING", "stale", False
         selected_status, selected_reason, selected_cache = status, reason, cache_used
         if status != "fresh":
-            stale_cache = validated_cache(cache_path, expected_day, 200 if symbol == "^TWII" else 2)
+            stale_cache = cached_history
             if stale_cache is not None:
                 cached_comparison = compare_sources(stale_cache, chosen)
                 if cached_comparison == "SOURCE_CONFLICT":
@@ -231,6 +312,7 @@ def _resolve_history(symbol, period, timezone, expected_date, lookback_months, c
                         "latestSessionDate": _session_day(stale_cache.index[-1]).isoformat(),
                         "expectedSessionDate": expected_day.isoformat(), "cacheUsed": True,
                         "status": "unavailable", "reasonCode": "SOURCE_CONFLICT",
+                        "sourceResults": source_results, "cacheStatus": "CONFLICT_BLOCKED",
                     }
                 if _session_day(stale_cache.index[-1]) > _session_day(chosen.index[-1]):
                     chosen, source, selected_cache = stale_cache, "verified_cache", True
@@ -242,6 +324,8 @@ def _resolve_history(symbol, period, timezone, expected_date, lookback_months, c
             "latestSessionDate": _session_day(chosen.index[-1]).isoformat(),
             "expectedSessionDate": expected_day.isoformat(), "cacheUsed": selected_cache,
             "status": selected_status, "reasonCode": selected_reason,
+            "sourceResults": source_results,
+            "cacheStatus": "CONFLICT_BLOCKED" if cache_status == "CONFLICT" else cache_status,
         }
 
     if official is not None:
@@ -251,12 +335,12 @@ def _resolve_history(symbol, period, timezone, expected_date, lookback_months, c
     else:
         chosen, source = None, None
 
-    cached = validated_cache(cache_path, expected_day, 200 if symbol == "^TWII" else 2)
+    cached = cached_history
     if cached is not None:
         if chosen is not None:
             comparison = compare_sources(cached, chosen)
             if comparison == "SOURCE_CONFLICT":
-                chosen, source, reason, status, cache_used = cached, "verified_cache", "SOURCE_CONFLICT", "unavailable", True
+                reason, status, cache_used = "SOURCE_CONFLICT", "unavailable", False
             elif _session_day(cached.index[-1]) > _session_day(chosen.index[-1]):
                 chosen, source, reason, status, cache_used = cached, "verified_cache", "VERIFIED_CACHE", "fresh", True
             else:
@@ -279,7 +363,10 @@ def _resolve_history(symbol, period, timezone, expected_date, lookback_months, c
         )
         status, cache_used = ("fresh" if is_current else "stale"), False
     else:
-        raise MarketDataError("SOURCES_UNAVAILABLE", attempts) from (yahoo_error or official_error)
+        error = MarketDataError("SOURCES_UNAVAILABLE", attempts)
+        error.source_results = source_results
+        error.cache_status = "CONFLICT_BLOCKED" if cache_status == "CONFLICT" else cache_status
+        raise error from (yahoo_error or official_error)
 
     return chosen, {
         "selectedSource": source, "sourceAttempts": attempts,
@@ -290,7 +377,20 @@ def _resolve_history(symbol, period, timezone, expected_date, lookback_months, c
         "latestSessionDate": _session_day(chosen.index[-1]).isoformat(),
         "expectedSessionDate": expected_day.isoformat(), "cacheUsed": cache_used,
         "status": status, "reasonCode": reason,
+        "sourceResults": source_results,
+        "cacheStatus": "CONFLICT_BLOCKED" if cache_status == "CONFLICT" else cache_status,
     }
+
+
+def _call_history_resolver(history_resolver, arguments, budget_deadline):
+    if history_resolver is _resolve_history:
+        return history_resolver(*arguments, budget_deadline=budget_deadline)
+    return history_resolver(*arguments)
+
+
+def _fetch_vix_history(expected_us, budget_deadline):
+    history = _history_for_completed_sessions("^VIX", "90d", NEW_YORK, expected_us, budget_deadline)
+    return _trim_history_period(history, expected_us, "90d")
 
 
 def _trim_history_period(frame, expected_day, period):
@@ -341,16 +441,29 @@ def market_snapshot(now=None, cache_dir=".calendar-cache", history_cache_dir=".m
         expected_tw = expected_us = None
         calendar_contract = {"status": "unavailable", "reasonCode": "CALENDAR_UNVERIFIED"}
 
+    # Taiwan index, Taiwan ETF, and VIX are independent acquisitions. Start
+    # them together so one slow official history cannot consume the shared
+    # 180-second deadline before the ETF fallback gets a chance to run.
+    market_pool = ThreadPoolExecutor(max_workers=3)
+    taiex_future = vix_future = fund_future = None
+    if calendars is not None and expected_tw:
+        taiex_future = market_pool.submit(
+            _call_history_resolver, history_resolver,
+            ("^TWII", "400d", TAIPEI, expected_tw, 14, history_cache_dir), budget_deadline,
+        )
+        fund_future = market_pool.submit(
+            _call_history_resolver, history_resolver,
+            ("006208.TW", "6mo", TAIPEI, expected_tw, 7, history_cache_dir), budget_deadline,
+        )
+    if calendars is not None and expected_us:
+        vix_future = market_pool.submit(_fetch_vix_history, expected_us, budget_deadline)
+
     taiwan_latest = []
     taiwan_reference_sessions = set()
     taiex_history = None
     try:
         if expected_tw:
-            resolver_args = ("^TWII", "400d", TAIPEI, expected_tw, 14, history_cache_dir)
-            taiex_history, instruments["^TWII"] = (
-                history_resolver(*resolver_args, budget_deadline=budget_deadline)
-                if history_resolver is _resolve_history else history_resolver(*resolver_args)
-            )
+            taiex_history, instruments["^TWII"] = taiex_future.result()
         else:
             taiex_history, instruments["^TWII"] = None, {}
         taiwan_reference_sessions = {
@@ -389,9 +502,7 @@ def market_snapshot(now=None, cache_dir=".calendar-cache", history_cache_dir=".m
 
     us_latest = None
     try:
-        vix_history = _history_for_completed_sessions(
-            "^VIX", "90d", NEW_YORK, expected_us, budget_deadline,
-        ) if expected_us else None
+        vix_history = vix_future.result() if expected_us else None
         vix_cache_path = os.path.join(history_cache_dir, "VIX.json")
         vix_history = _trim_history_period(vix_history, expected_us, "90d") if vix_history is not None else None
         vix_reference_sessions = {_session_day(value) for value in vix_history.index} if vix_history is not None else set()
@@ -449,11 +560,7 @@ def market_snapshot(now=None, cache_dir=".calendar-cache", history_cache_dir=".m
     fund_latest = None
     try:
         if expected_tw:
-            resolver_args = ("006208.TW", "6mo", TAIPEI, expected_tw, 7, history_cache_dir)
-            fund, instruments["006208"] = (
-                history_resolver(*resolver_args, budget_deadline=budget_deadline)
-                if history_resolver is _resolve_history else history_resolver(*resolver_args)
-            )
+            fund, instruments["006208"] = fund_future.result()
         else:
             fund, instruments["006208"] = None, {}
         month_index = expected_tw.year * 12 + expected_tw.month - 1 - 6
@@ -486,6 +593,8 @@ def market_snapshot(now=None, cache_dir=".calendar-cache", history_cache_dir=".m
     except Exception as error:
         instruments["006208"] = _instrument_failure(instruments.get("006208"), error, expected_tw)
         sources["006208"] = "stale" if instruments["006208"]["status"] == "stale" else _failed_source(error)
+
+    market_pool.shutdown(wait=True)
 
     if calendars is None:
         markets["taiwan"] = {"status": "calendar_unverified", "latestSessionDate": None,

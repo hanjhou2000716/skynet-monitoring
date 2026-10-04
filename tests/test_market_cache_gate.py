@@ -1,6 +1,6 @@
 import unittest
 
-from market_cache_gate import is_cache_eligible
+from market_cache_gate import cacheable_instruments, is_cache_eligible
 
 
 class MarketCacheGateTests(unittest.TestCase):
@@ -13,8 +13,8 @@ class MarketCacheGateTests(unittest.TestCase):
                 "us": {"status": "fresh", "latestSessionDate": "2026-09-30", "expectedSessionDate": "2026-09-30"},
             },
             "instruments": {
-                "^TWII": {"status": "fresh", "latestSessionDate": "2026-09-30", "expectedSessionDate": "2026-09-30", "reasonCode": "OK"},
-                "006208": {"status": "fresh", "latestSessionDate": "2026-09-30", "expectedSessionDate": "2026-09-30", "reasonCode": "SECONDARY_LAGGING"},
+                "^TWII": {"status": "fresh", "latestSessionDate": "2026-09-30", "expectedSessionDate": "2026-09-30", "reasonCode": "OK", "selectedSource": "TWSE"},
+                "006208": {"status": "fresh", "latestSessionDate": "2026-09-30", "expectedSessionDate": "2026-09-30", "reasonCode": "SECONDARY_LAGGING", "selectedSource": "TWSE"},
             },
             "sources": {"taiex": "ok", "006208": "ok", "vix": "ok"},
         }
@@ -27,24 +27,26 @@ class MarketCacheGateTests(unittest.TestCase):
         nested["dataQuality"] = {"sources": nested.pop("sources")}
         self.assertTrue(is_cache_eligible(nested))
 
-    def test_failed_source_cannot_refresh_cache(self):
+    def test_failed_instrument_cannot_refresh_its_cache(self):
         failed = self._healthy_payload()
-        failed["sources"]["006208"] = "stale"
-        self.assertFalse(is_cache_eligible(failed))
+        failed["instruments"]["006208"]["status"] = "unavailable"
+        self.assertEqual(cacheable_instruments(failed), {"^TWII"})
+        self.assertTrue(is_cache_eligible(failed))
 
-    def test_degraded_or_conflicted_snapshot_cannot_refresh_cache(self):
+    def test_degraded_snapshot_preserves_good_instrument_cache_without_refreshing_conflict(self):
         degraded = self._healthy_payload()
         degraded["status"] = "degraded"
-        self.assertFalse(is_cache_eligible(degraded))
+        degraded["instruments"]["006208"]["status"] = "unavailable"
+        self.assertEqual(cacheable_instruments(degraded), {"^TWII"})
 
         conflict = self._healthy_payload()
         conflict["instruments"]["006208"]["reasonCode"] = "SOURCE_CONFLICT"
-        self.assertFalse(is_cache_eligible(conflict))
+        self.assertEqual(cacheable_instruments(conflict), {"^TWII"})
 
     def test_future_or_missing_market_session_cannot_refresh_cache(self):
         stale = self._healthy_payload()
         stale["instruments"]["006208"]["latestSessionDate"] = "2026-09-29"
-        self.assertFalse(is_cache_eligible(stale))
+        self.assertNotIn("006208", cacheable_instruments(stale))
 
 
 if __name__ == "__main__":

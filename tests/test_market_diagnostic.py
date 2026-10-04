@@ -24,6 +24,33 @@ class MarketDiagnosticTests(unittest.TestCase):
         self.assertEqual(stale_checkout["stage"], "generation_not_verified")
         self.assertNotEqual(stale_checkout["stage"], "generated")
 
+    def test_source_recovery_diagnostics_are_actionable_but_allowlisted(self):
+        status = {
+            "schemaVersion": 2,
+            "status": "degraded",
+            "service": {"runId": "123", "commit": "abc"},
+            "calendar": {"status": "verified"},
+            "instruments": {
+                "006208": {
+                    "status": "unavailable", "latestSessionDate": None,
+                    "expectedSessionDate": "2026-10-02", "reasonCode": "SOURCES_UNAVAILABLE",
+                    "cacheStatus": "MISSING_OR_INVALID", "privateProviderBody": "must not escape",
+                    "sourceResults": {
+                        "TWSE": {"status": "UNAVAILABLE", "reasonCode": "SOURCE_HTTP_503", "attempts": 3,
+                                 "durationMs": 1200, "privateProviderBody": "must not escape"},
+                        "Yahoo": {"status": "UNAVAILABLE", "reasonCode": "SOURCE_TIMEOUT", "attempts": 3,
+                                  "durationMs": 900, "privateProviderBody": "must not escape"},
+                    },
+                },
+            },
+        }
+        diagnostic = summarize(status, "123", "abc", "success")
+        instrument = diagnostic["instruments"]["006208"]
+        self.assertEqual(instrument["sourceResults"]["TWSE"]["reasonCode"], "SOURCE_HTTP_503")
+        self.assertEqual(instrument["sourceResults"]["Yahoo"]["reasonCode"], "SOURCE_TIMEOUT")
+        self.assertEqual(instrument["cacheStatus"], "MISSING_OR_INVALID")
+        self.assertNotIn("privateProviderBody", str(diagnostic))
+
 
 if __name__ == "__main__":
     unittest.main()
