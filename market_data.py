@@ -257,6 +257,8 @@ def validated_cache(path, expected_date, min_sessions):
         if not ((frame["Low"].astype(float) <= frame[["Open", "Close"]].astype(float).min(axis=1)) &
                 (frame["High"].astype(float) >= frame[["Open", "Close"]].astype(float).max(axis=1))).all():
             return None
+        frame.attrs["cacheSource"] = payload["source"]
+        frame.attrs["cacheVerifiedAt"] = payload["verifiedAt"]
         return frame
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
         return None

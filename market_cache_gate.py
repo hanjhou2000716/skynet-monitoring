@@ -5,37 +5,31 @@ import os
 import sys
 
 
-def is_cache_eligible(payload):
-    if not isinstance(payload, dict) or payload.get("status") != "ok":
-        return False
+def cacheable_instruments(payload):
+    if not isinstance(payload, dict):
+        return set()
     calendar = payload.get("calendar")
     if not isinstance(calendar, dict) or calendar.get("status") != "verified":
-        return False
-    markets = payload.get("markets")
-    if not isinstance(markets, dict) or not markets:
-        return False
-    for market in markets.values():
-        if not isinstance(market, dict) or market.get("status") not in ("fresh", "market_closed"):
-            return False
-        if not market.get("latestSessionDate") or market.get("latestSessionDate") != market.get("expectedSessionDate"):
-            return False
+        return set()
     instruments = payload.get("instruments")
     if not isinstance(instruments, dict) or not instruments:
-        return False
-    for instrument in instruments.values():
-        if not isinstance(instrument, dict) or instrument.get("status") not in ("fresh", "market_closed"):
-            return False
-        if instrument.get("reasonCode") == "SOURCE_CONFLICT":
-            return False
-        if not instrument.get("latestSessionDate") or instrument.get("latestSessionDate") != instrument.get("expectedSessionDate"):
-            return False
-    # status.json flattens dataQuality into its top-level contract. Keep
-    # compatibility with internal payloads that still nest the source map.
-    quality = payload.get("dataQuality")
-    sources = quality.get("sources") if isinstance(quality, dict) else None
-    if sources is None:
-        sources = payload.get("sources")
-    return isinstance(sources, dict) and bool(sources) and all(value == "ok" for value in sources.values())
+        return set()
+    # Each instrument cache is written only after its own full session and
+    # OHLC validation. A failure in another instrument must not discard a
+    # good cache; conflicts are never eligible for cache refresh.
+    return {
+        symbol for symbol, instrument in instruments.items()
+        if isinstance(instrument, dict)
+        and instrument.get("status") in ("fresh", "market_closed")
+        and instrument.get("reasonCode") != "SOURCE_CONFLICT"
+        and instrument.get("selectedSource") in ("TWSE", "Yahoo", "verified_cache")
+        and instrument.get("latestSessionDate")
+        and instrument.get("latestSessionDate") == instrument.get("expectedSessionDate")
+    }
+
+
+def is_cache_eligible(payload):
+    return bool(cacheable_instruments(payload))
 
 
 def main(status_path=None, output_path=None):

@@ -191,6 +191,98 @@ class SkynetPipelineTests(unittest.TestCase):
         self.assertEqual(diagnostic["reasonCode"], "SECONDARY_UNAVAILABLE")
         self.assertEqual(diagnostic["comparison"], "SECONDARY_UNAVAILABLE")
 
+    def test_006208_legacy_cache_round_trip_restores_and_reads_canonical_key(self):
+        import pandas as pd
+
+        from market_data import MarketDataError, save_validated_cache
+        from tg_bot_optimized import _resolve_history
+
+        expected = dt.date(2026, 10, 2)
+        sessions = [stamp.date() for stamp in pd.bdate_range(end=expected, periods=126)]
+        closes = [100 + index / 10 for index in range(len(sessions))]
+        frame = pd.DataFrame({
+            "Open": closes, "High": [value + 1 for value in closes],
+            "Low": [value - 1 for value in closes], "Close": closes,
+        }, index=pd.Index(sessions, dtype=object))
+        with tempfile.TemporaryDirectory() as directory:
+            legacy_path = os.path.join(directory, "006208.TW.json")
+            canonical_path = os.path.join(directory, "006208.json")
+            self.assertTrue(save_validated_cache(
+                legacy_path, frame, "TWSE", dt.datetime.now(dt.timezone.utc).isoformat(),
+            ))
+            with patch("tg_bot_optimized.fetch_twse_history", side_effect=MarketDataError("SOURCE_HTTP_503", 3)), \
+                 patch("tg_bot_optimized._history_for_completed_sessions", side_effect=TimeoutError("provider timeout")):
+                restored, diagnostic = _resolve_history(
+                    "006208.TW", "6mo", TAIPEI, expected, 7, directory,
+                    budget_deadline=__import__("time").monotonic() + 30,
+                )
+            self.assertTrue(os.path.isfile(canonical_path))
+            self.assertEqual(restored.index[-1].date(), expected)
+            self.assertEqual(diagnostic["selectedSource"], "verified_cache")
+            self.assertEqual(diagnostic["reasonCode"], "VERIFIED_CACHE")
+            self.assertTrue(diagnostic["cacheUsed"])
+            self.assertEqual(diagnostic["sourceResults"]["TWSE"]["reasonCode"], "SOURCE_HTTP_503")
+            self.assertEqual(diagnostic["sourceResults"]["Yahoo"]["reasonCode"], "SOURCE_TIMEOUT")
+
+    def test_price_conflict_never_uses_a_verified_cache_to_release_data(self):
+        import pandas as pd
+
+        from market_data import save_validated_cache
+        from tg_bot_optimized import _resolve_history
+
+        expected = dt.date(2026, 10, 2)
+        sessions = [dt.date(2026, 10, 1), expected]
+        official = pd.DataFrame({
+            "Open": [99, 100], "High": [102, 103], "Low": [98, 99], "Close": [100, 101],
+        }, index=pd.Index(sessions, dtype=object))
+        secondary = official.copy()
+        secondary["Close"] = [140, 141]
+        secondary["Open"] = [139, 140]
+        secondary["High"] = [142, 143]
+        secondary["Low"] = [138, 139]
+        with tempfile.TemporaryDirectory() as directory:
+            cached = pd.DataFrame({
+                "Open": [98 + index / 10 for index in range(126)],
+                "High": [100 + index / 10 for index in range(126)],
+                "Low": [97 + index / 10 for index in range(126)],
+                "Close": [99 + index / 10 for index in range(126)],
+            }, index=pd.Index([stamp.date() for stamp in pd.bdate_range(end=expected, periods=126)], dtype=object))
+            save_validated_cache(os.path.join(directory, "006208.json"), cached, "TWSE",
+                                 dt.datetime.now(dt.timezone.utc).isoformat())
+            with patch("tg_bot_optimized.fetch_twse_history", return_value=(official, 1)), \
+                 patch("tg_bot_optimized._history_for_completed_sessions", return_value=secondary):
+                _, diagnostic = _resolve_history(
+                    "006208.TW", "6mo", TAIPEI, expected, 7, directory,
+                    budget_deadline=__import__("time").monotonic() + 30,
+                )
+        self.assertEqual(diagnostic["status"], "unavailable")
+        self.assertEqual(diagnostic["reasonCode"], "SOURCE_CONFLICT")
+        self.assertFalse(diagnostic["cacheUsed"])
+        self.assertEqual(diagnostic["cacheStatus"], "CONFLICT_BLOCKED")
+
+    def test_conflicting_canonical_and_legacy_cache_are_not_migrated_or_used(self):
+        import pandas as pd
+
+        from market_data import save_validated_cache
+        from tg_bot_optimized import _verified_market_cache
+
+        expected = dt.date(2026, 10, 2)
+        sessions = [stamp.date() for stamp in pd.bdate_range(end=expected, periods=126)]
+        with tempfile.TemporaryDirectory() as directory:
+            for filename, offset in (("006208.json", 100), ("006208.TW.json", 150)):
+                closes = [offset + index / 10 for index in range(len(sessions))]
+                frame = pd.DataFrame({
+                    "Open": closes, "High": [value + 1 for value in closes],
+                    "Low": [value - 1 for value in closes], "Close": closes,
+                }, index=pd.Index(sessions, dtype=object))
+                self.assertTrue(save_validated_cache(
+                    os.path.join(directory, filename), frame, "TWSE",
+                    dt.datetime.now(dt.timezone.utc).isoformat(),
+                ))
+            cached, _, _, cache_status = _verified_market_cache("006208.TW", expected, directory)
+        self.assertIsNone(cached)
+        self.assertEqual(cache_status, "CONFLICT")
+
     def test_duplicate_or_non_finite_market_bars_fail_closed(self):
         import pandas as pd
 
