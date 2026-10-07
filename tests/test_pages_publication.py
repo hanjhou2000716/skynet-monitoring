@@ -1,10 +1,13 @@
 import json
+from io import BytesIO
 from pathlib import Path
 import tempfile
 import unittest
+from urllib.error import HTTPError
 from urllib.parse import unquote, urlsplit
+from unittest.mock import patch
 
-from pages_publication import PublicationError, pages_build_version, prepare_manifest, verify_live
+from pages_publication import PublicationError, _deploy, _oidc, _request_json, pages_build_version, prepare_manifest, verify_live
 
 
 class _Clock:
@@ -29,6 +32,35 @@ class PagesPublicationTests(unittest.TestCase):
             "service": {"generatedAt": stamp, "windowDate": "2026-10-07", "window": "morning", "commit": "abc", "runId": "101"},
         }, separators=(",", ":")), encoding="utf-8")
 
+    def test_pages_api_http_error_includes_safe_status_and_reason(self):
+        error = HTTPError(
+            "https://api.github.com/repos/owner/skynet/pages/deployments",
+            422,
+            "Validation failed",
+            hdrs=None,
+            fp=BytesIO(b'{"message":"Invalid build version; token ghp_123456789012345678901234567890123456"}'),
+        )
+        with patch("pages_publication.urlopen", side_effect=error):
+            with self.assertRaises(PublicationError) as raised:
+                _request_json("POST", "https://api.github.com/example", "not-a-real-token", {})
+        self.assertIn("HTTP 422", str(raised.exception))
+        self.assertIn("Invalid build version", str(raised.exception))
+        self.assertNotIn("ghp_123456789012345678901234567890123456", str(raised.exception))
+
+    def test_oidc_uses_runner_default_audience_without_rewriting_url(self):
+        endpoint = "https://actions.example/oidc?api-version=2.0"
+        env = {"ACTIONS_ID_TOKEN_REQUEST_URL": endpoint, "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "runner-token"}
+        with patch("pages_publication._read_bytes", return_value=b'{"value":"oidc-token"}') as read:
+            self.assertEqual(_oidc(env), "oidc-token")
+        self.assertEqual(read.call_args.args[0], endpoint)
+
+    def test_pages_api_deployment_uses_supported_defaults_and_unique_40_char_version(self):
+        with patch("pages_publication._request_json", return_value={"status_url": "https://api.example/status"}) as request:
+            _deploy("owner/skynet", 42, "owner/skynet:run:attempt:1", 2, "token", "oidc")
+        body = request.call_args.args[3]
+        self.assertEqual(set(body), {"artifact_id", "pages_build_version", "oidc_token"})
+        self.assertEqual(len(body["pages_build_version"]), 40)
+
     def test_unique_manifest_contains_public_identity_and_core_hashes(self):
         with tempfile.TemporaryDirectory() as directory:
             site = Path(directory) / "site"
@@ -39,7 +71,10 @@ class PagesPublicationTests(unittest.TestCase):
             })
             self.assertEqual(manifest["publicationId"], "owner/skynet:101:2:1")
             self.assertEqual(set(manifest["criticalFiles"]), {"index.html", "data.json", "status.json"})
-            self.assertNotEqual(pages_build_version(manifest["publicationId"], 1), pages_build_version(manifest["publicationId"], 2))
+            build_v1 = pages_build_version(manifest["publicationId"], 1)
+            build_v2 = pages_build_version(manifest["publicationId"], 2)
+            self.assertEqual(len(build_v1), 40)
+            self.assertNotEqual(build_v1, build_v2)
 
     def test_live_readback_checks_manifest_and_public_status_data_hashes(self):
         with tempfile.TemporaryDirectory() as directory:

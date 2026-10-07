@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any, Callable, Mapping
@@ -76,7 +77,11 @@ def prepare_manifest(site_dir: str | Path, *, env: Mapping[str, str] | None = No
 
 
 def pages_build_version(publication_id: str, deployment_attempt: int) -> str:
-    return _hash(f"{publication_id}:deployment:{deployment_attempt}".encode())
+    # GitHub's Pages deploy action uses a 40-character commit-shaped build
+    # version. Keep the same API-compatible form while deriving uniqueness
+    # from the publication/run identity, not from a fabricated GITHUB_SHA.
+    identity = f"{publication_id}:deployment:{deployment_attempt}".encode()
+    return hashlib.sha256(identity).hexdigest()[:40]
 
 
 def _read_bytes(url: str, *, headers: Mapping[str, str] | None = None, timeout: float = 20) -> bytes:
@@ -101,7 +106,20 @@ def _request_json(method: str, url: str, token: str, body: Mapping[str, Any] | N
     try:
         with urlopen(request, timeout=30) as response:
             raw = response.read()
-    except (HTTPError, URLError, TimeoutError) as error:
+    except HTTPError as error:
+        # Keep GitHub's actionable validation/permission message while never
+        # echoing request headers or credentials into Actions logs.
+        try:
+            payload = json.loads(error.read(4096))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            payload = None
+        detail = payload.get("message", "") if isinstance(payload, Mapping) else ""
+        detail = re.sub(r"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b", "[redacted]", str(detail))
+        detail = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [redacted]", detail)
+        detail = " ".join(detail.split())[:300]
+        suffix = f": {detail}" if detail else ""
+        raise PublicationError(f"Pages API {method} failed: HTTP {error.code}{suffix}") from error
+    except (URLError, TimeoutError) as error:
         raise PublicationError(f"Pages API {method} failed: {type(error).__name__}") from error
     if not raw:
         return {}
@@ -115,10 +133,11 @@ def _oidc(env: Mapping[str, str]) -> str:
     endpoint, request_token = env.get("ACTIONS_ID_TOKEN_REQUEST_URL", ""), env.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
     if not endpoint or not request_token:
         raise PublicationError("GitHub Actions OIDC endpoint is unavailable")
-    separator = "&" if "?" in endpoint else "?"
-    url = endpoint + separator + urlencode({"audience": f"https://github.com/{env.get('GITHUB_REPOSITORY', '')}"})
     try:
-        payload = json.loads(_read_bytes(url, headers={"Authorization": f"Bearer {request_token}"}))
+        # Match actions/deploy-pages: use the runner-issued default audience
+        # instead of appending an audience that may conflict with the runtime
+        # endpoint's own query parameters.
+        payload = json.loads(_read_bytes(endpoint, headers={"Authorization": f"Bearer {request_token}"}))
     except (OSError, ValueError, HTTPError, URLError) as error:
         raise PublicationError(f"OIDC request failed: {type(error).__name__}") from error
     if not isinstance(payload, Mapping) or not isinstance(payload.get("value"), str):
@@ -142,7 +161,6 @@ def _artifact_id(repo: str, run_id: str, token: str) -> int:
 def _deploy(repo: str, artifact_id: int, publication_id: str, attempt: int, token: str, oidc_token: str) -> tuple[str, str | None]:
     result = _request_json("POST", f"{API_ROOT}/repos/{repo}/pages/deployments", token, {
         "artifact_id": artifact_id,
-        "environment": "github-pages",
         "pages_build_version": pages_build_version(publication_id, attempt),
         "oidc_token": oidc_token,
     })
