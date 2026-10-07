@@ -1,7 +1,10 @@
 import datetime as dt
+from io import BytesIO
+import json
 import unittest
+from unittest.mock import patch
 
-from schedule_gate import TAIPEI, already_succeeded, decide, target_window
+from schedule_gate import TAIPEI, already_succeeded, decide, fetch_run_success, target_window
 
 
 def good_status(day="2026-09-29", window="morning", commit="abc"):
@@ -49,6 +52,20 @@ class ScheduleGateTests(unittest.TestCase):
         )
         self.assertTrue(run)
         self.assertEqual(reason, "RUN_DEPLOYMENT_RECORD_UNVERIFIED")
+
+    def test_fallback_gate_requires_independent_publication_verification_artifact(self):
+        run = {"status": "completed", "conclusion": "success", "head_sha": "abc"}
+        verified = {"artifacts": [{"name": "skynet-publication-verification", "expired": False}]}
+        with patch("schedule_gate.urllib.request.urlopen", side_effect=[
+            BytesIO(json.dumps(run).encode()), BytesIO(json.dumps(verified).encode()),
+        ]):
+            self.assertTrue(fetch_run_success("123", "abc"))
+
+        unverified = {"artifacts": [{"name": "skynet-publication-deployment-summary", "expired": False}]}
+        with patch("schedule_gate.urllib.request.urlopen", side_effect=[
+            BytesIO(json.dumps(run).encode()), BytesIO(json.dumps(unverified).encode()),
+        ]):
+            self.assertFalse(fetch_run_success("123", "abc"))
 
     def test_degraded_market_data_allows_fallback(self):
         payload = good_status()

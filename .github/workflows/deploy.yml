@@ -12,8 +12,6 @@ on:
 permissions:
   contents: read
   actions: read
-  pages: write
-  id-token: write
 concurrency:
   group: "pages"
   queue: max
@@ -46,9 +44,13 @@ jobs:
     needs: gate
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       publish: ${{ steps.publish_gate.outputs.deploy }}
       publish_reason: ${{ steps.publish_gate.outputs.reason }}
+      pages_base_url: https://${{ github.repository_owner }}.github.io/skynet-monitoring/
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -128,6 +130,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_SHA: ${{ github.sha }}
         run: python deployment_gate.py public/status.json
+      - name: Stamp build with unique publication identity and content hashes
+        if: steps.publish_gate.outputs.deploy == 'true'
+        env:
+          PUBLICATION_WINDOW_DATE: ${{ needs.gate.outputs.window_date }}
+          PUBLICATION_WINDOW: ${{ needs.gate.outputs.window }}
+        run: python pages_publication.py prepare build
       - name: Record Node version for diagnostics
         id: node_version
         if: always()
@@ -155,6 +163,13 @@ jobs:
         uses: actions/upload-pages-artifact@v5.0.0
         with:
           path: ./build
+      - name: Upload private copy of publication manifest for verification
+        if: steps.publish_gate.outputs.deploy == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: skynet-publication-manifest
+          path: build/publication.json
+          if-no-files-found: error
   deploy:
     if: needs.build.outputs.publish == 'true'
     environment:
@@ -162,7 +177,70 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12.14'
+      - name: Download publication manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: skynet-publication-manifest
+          path: .private-build
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5.0.0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLICATION_SUMMARY_PATH: .private-build/pages-publication-summary.json
+        run: python pages_publication.py publish-and-verify .private-build/publication.json
+      - name: Upload Pages publication verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: skynet-publication-deployment-summary
+          path: .private-build/pages-publication-summary.json
+          if-no-files-found: ignore
+
+  verify-publication:
+    name: Independently verify live Pages content
+    needs: [build, deploy]
+    if: needs.build.outputs.publish == 'true' && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout read-only verifier
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12.14'
+
+      - name: Download the exact publication manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: skynet-publication-manifest
+          path: .private-build
+
+      - name: Independently verify current public content
+        env:
+          PAGES_BASE_URL: ${{ needs.build.outputs.pages_base_url }}
+          PUBLICATION_SUMMARY_PATH: .private-build/independent-publication-verification.json
+        run: python pages_publication.py verify-live .private-build
+
+      - name: Upload independent publication verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: skynet-publication-verification
+          path: .private-build/independent-publication-verification.json
+          if-no-files-found: ignore
