@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 TAIPEI = ZoneInfo("Asia/Taipei")
 STATUS_URL = "https://hanjhou2000716.github.io/skynet-monitoring/status.json"
 GITHUB_RUN_URL = "https://api.github.com/repos/hanjhou2000716/skynet-monitoring/actions/runs/{}"
+GITHUB_RUN_ARTIFACTS_URL = "https://api.github.com/repos/hanjhou2000716/skynet-monitoring/actions/runs/{}/artifacts?per_page=100"
 GITHUB_RUNS_URL = "https://api.github.com/repos/hanjhou2000716/skynet-monitoring/actions/workflows/deploy.yml/runs?branch=main&per_page=100"
 
 
@@ -66,7 +67,22 @@ def fetch_run_success(run_id, commit):
     request = urllib.request.Request(GITHUB_RUN_URL.format(run_id), headers=headers)
     with urllib.request.urlopen(request, timeout=8) as response:
         run = json.loads(response.read().decode("utf-8"))
-    return run.get("status") == "completed" and run.get("conclusion") == "success" and run.get("head_sha") == commit
+    if not (
+        run.get("status") == "completed"
+        and run.get("conclusion") == "success"
+        and run.get("head_sha") == commit
+    ):
+        return False
+    artifacts_request = urllib.request.Request(GITHUB_RUN_ARTIFACTS_URL.format(run_id), headers=headers)
+    with urllib.request.urlopen(artifacts_request, timeout=8) as response:
+        artifact_payload = json.loads(response.read().decode("utf-8"))
+    artifacts = artifact_payload.get("artifacts", []) if isinstance(artifact_payload, dict) else []
+    return any(
+        isinstance(item, dict)
+        and item.get("name") == "skynet-publication-verification"
+        and item.get("expired") is not True
+        for item in artifacts
+    )
 
 
 def fetch_window_has_no_newer_failures(payload, target_date, target, now):

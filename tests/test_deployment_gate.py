@@ -85,6 +85,9 @@ class DeploymentGateTests(unittest.TestCase):
         self.assertIn("queue: max", workflow)
         self.assertIn("deployment_gate.py public/status.json", workflow)
         self.assertIn("needs.build.outputs.publish == 'true'", workflow)
+        self.assertIn("verify-publication:", workflow)
+        self.assertIn("python pages_publication.py verify-live .private-build", workflow)
+        self.assertIn("name: skynet-publication-verification", workflow)
 
 
 if __name__ == "__main__":
