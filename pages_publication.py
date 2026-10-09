@@ -325,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "verify-live":
             if not args.base_url:
                 raise PublicationError("Pages base URL is required for independent verification")
-            result = verify_live_publication(args.site_dir, args.base_url)
+            result = verify_live(args.site_dir, args.base_url)
             manifest = json.loads((Path(args.site_dir) / MANIFEST).read_text(encoding="utf-8"))
             value = {"status": result, "publicationId": manifest.get("publicationId")}
             _write_summary(value, None, os.environ)
