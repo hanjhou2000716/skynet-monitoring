@@ -44,6 +44,8 @@ def prepare_manifest(site_dir: str | Path, *, env: Mapping[str, str] | None = No
     ))
     if not all((repo, run_id, attempt, commit)):
         raise PublicationError("workflow repository, run identity, or source commit is missing")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+        raise PublicationError("source commit must be a full Git commit SHA")
     try:
         status = json.loads((root / "status.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -53,7 +55,8 @@ def prepare_manifest(site_dir: str | Path, *, env: Mapping[str, str] | None = No
         raise PublicationError("generated public status has no service evidence")
     digests = {
         item.relative_to(root).as_posix(): _hash(item.read_bytes())
-        for item in sorted(root.rglob("*")) if item.is_file() and item.name != MANIFEST
+        for item in sorted(root.rglob("*"))
+        if item.is_file() and item.name not in {MANIFEST, ".nojekyll"}
     }
     critical = {name: digests[name] for name in ("index.html", "data.json", "status.json")}
     value = {
@@ -76,12 +79,12 @@ def prepare_manifest(site_dir: str | Path, *, env: Mapping[str, str] | None = No
     return value
 
 
-def pages_build_version(publication_id: str, deployment_attempt: int) -> str:
-    # GitHub's Pages deploy action uses a 40-character commit-shaped build
-    # version. Keep the same API-compatible form while deriving uniqueness
-    # from the publication/run identity, not from a fabricated GITHUB_SHA.
-    identity = f"{publication_id}:deployment:{deployment_attempt}".encode()
-    return hashlib.sha256(identity).hexdigest()[:40]
+def pages_build_version(source_commit: str) -> str:
+    # GitHub Pages expects the actual source commit as its build version.
+    # Publication/run uniqueness is recorded separately in publication.json.
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", str(source_commit)):
+        raise PublicationError("Pages build version requires a full source commit SHA")
+    return str(source_commit).lower()
 
 
 def _read_bytes(url: str, *, headers: Mapping[str, str] | None = None, timeout: float = 20) -> bytes:
@@ -117,8 +120,13 @@ def _request_json(method: str, url: str, token: str, body: Mapping[str, Any] | N
         detail = re.sub(r"(?i)\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b", "[redacted]", str(detail))
         detail = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [redacted]", detail)
         detail = " ".join(detail.split())[:300]
+        request_id = error.headers.get("X-GitHub-Request-Id", "") if error.headers else ""
+        request_id = re.sub(r"[^A-Za-z0-9-]", "", str(request_id))[:80]
+        request_suffix = f" request_id={request_id}" if request_id else ""
         suffix = f": {detail}" if detail else ""
-        raise PublicationError(f"Pages API {method} failed: HTTP {error.code}{suffix}") from error
+        raise PublicationError(
+            f"Pages API {method} failed: HTTP {error.code}{request_suffix}{suffix}"
+        ) from error
     except (URLError, TimeoutError) as error:
         raise PublicationError(f"Pages API {method} failed: {type(error).__name__}") from error
     if not raw:
@@ -158,10 +166,10 @@ def _artifact_id(repo: str, run_id: str, token: str) -> int:
     return int(max(matches, key=lambda item: int(item.get("id", 0)))["id"])
 
 
-def _deploy(repo: str, artifact_id: int, publication_id: str, attempt: int, token: str, oidc_token: str) -> tuple[str, str | None]:
+def _deploy(repo: str, artifact_id: int, source_commit: str, token: str, oidc_token: str) -> tuple[str, str | None]:
     result = _request_json("POST", f"{API_ROOT}/repos/{repo}/pages/deployments", token, {
         "artifact_id": artifact_id,
-        "pages_build_version": pages_build_version(publication_id, attempt),
+        "pages_build_version": pages_build_version(source_commit),
         "oidc_token": oidc_token,
     })
     if not isinstance(result, Mapping) or not result.get("status_url"):
@@ -262,7 +270,7 @@ def publish_and_verify(manifest_path: str | Path, *, env: Mapping[str, str] | No
     artifact_id = _artifact_id(repo, run_id, token)
     for attempt in (1, 2):
         try:
-            status_url, page_url = _deploy(repo, artifact_id, expected["publicationId"], attempt, token, oidc_provider(env))
+            status_url, page_url = _deploy(repo, artifact_id, expected["sourceCommit"], token, oidc_provider(env))
             _wait_deployment(status_url, token, clock() + 600, wait, clock)
             result = verify(site_dir, base, wait=wait, clock=clock, max_wait=300)
             return {
@@ -270,7 +278,7 @@ def publish_and_verify(manifest_path: str | Path, *, env: Mapping[str, str] | No
                 "publicationId": expected["publicationId"],
                 "deploymentAttempt": attempt,
                 "artifactId": artifact_id,
-                "pagesBuildVersion": pages_build_version(expected["publicationId"], attempt),
+                "pagesBuildVersion": pages_build_version(expected["sourceCommit"]),
                 "pageUrl": page_url or base,
                 "deploymentAccepted": True,
                 "liveReadback": result,
@@ -279,7 +287,7 @@ def publish_and_verify(manifest_path: str | Path, *, env: Mapping[str, str] | No
         except PublicationError as error:
             if "SUPERSEDED" in str(error):
                 return {"status": "SUPERSEDED", "publicationId": expected.get("publicationId"), "deploymentAttempt": attempt}
-            if attempt == 2:
+            if attempt == 2 or "PUBLICATION_NOT_VISIBLE" not in str(error):
                 raise
     raise PublicationError("Pages deployment failed")
 

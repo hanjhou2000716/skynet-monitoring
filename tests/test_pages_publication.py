@@ -3,6 +3,7 @@ from io import BytesIO
 from pathlib import Path
 import tempfile
 import unittest
+from email.message import Message
 from urllib.error import HTTPError
 from urllib.parse import unquote, urlsplit
 from unittest.mock import patch
@@ -37,13 +38,14 @@ class PagesPublicationTests(unittest.TestCase):
             "https://api.github.com/repos/owner/skynet/pages/deployments",
             422,
             "Validation failed",
-            hdrs=None,
+            hdrs={"X-GitHub-Request-Id": "ABC-123"},
             fp=BytesIO(b'{"message":"Invalid build version; token ghp_123456789012345678901234567890123456"}'),
         )
         with patch("pages_publication.urlopen", side_effect=error):
             with self.assertRaises(PublicationError) as raised:
                 _request_json("POST", "https://api.github.com/example", "not-a-real-token", {})
         self.assertIn("HTTP 422", str(raised.exception))
+        self.assertIn("request_id=ABC-123", str(raised.exception))
         self.assertIn("Invalid build version", str(raised.exception))
         self.assertNotIn("ghp_123456789012345678901234567890123456", str(raised.exception))
 
@@ -54,27 +56,32 @@ class PagesPublicationTests(unittest.TestCase):
             self.assertEqual(_oidc(env), "oidc-token")
         self.assertEqual(read.call_args.args[0], endpoint)
 
-    def test_pages_api_deployment_uses_supported_defaults_and_unique_40_char_version(self):
+    def test_pages_api_deployment_uses_source_commit_as_build_version(self):
+        source_commit = "a" * 40
         with patch("pages_publication._request_json", return_value={"status_url": "https://api.example/status"}) as request:
-            _deploy("owner/skynet", 42, "owner/skynet:run:attempt:1", 2, "token", "oidc")
+            _deploy("owner/skynet", 42, source_commit, "token", "oidc")
         body = request.call_args.args[3]
         self.assertEqual(set(body), {"artifact_id", "pages_build_version", "oidc_token"})
-        self.assertEqual(len(body["pages_build_version"]), 40)
+        self.assertEqual(body["pages_build_version"], source_commit)
+        self.assertEqual(pages_build_version(source_commit), source_commit)
+        with self.assertRaises(PublicationError):
+            pages_build_version("short-sha")
 
     def test_unique_manifest_contains_public_identity_and_core_hashes(self):
         with tempfile.TemporaryDirectory() as directory:
             site = Path(directory) / "site"
             self._site(site)
+            (site / ".nojekyll").write_text("", encoding="utf-8")
             manifest = prepare_manifest(site, env={
                 "GITHUB_REPOSITORY": "owner/skynet", "GITHUB_RUN_ID": "101",
-                "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "abc",
+                "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40,
             })
             self.assertEqual(manifest["publicationId"], "owner/skynet:101:2:1")
+            self.assertEqual(manifest["sourceCommit"], "a" * 40)
             self.assertEqual(set(manifest["criticalFiles"]), {"index.html", "data.json", "status.json"})
-            build_v1 = pages_build_version(manifest["publicationId"], 1)
-            build_v2 = pages_build_version(manifest["publicationId"], 2)
-            self.assertEqual(len(build_v1), 40)
-            self.assertNotEqual(build_v1, build_v2)
+            self.assertTrue((site / ".nojekyll").is_file())
+            self.assertNotIn(".nojekyll", manifest["files"])
+            self.assertEqual(pages_build_version(manifest["sourceCommit"]), manifest["sourceCommit"])
 
     def test_live_readback_checks_manifest_and_public_status_data_hashes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -82,7 +89,7 @@ class PagesPublicationTests(unittest.TestCase):
             self._site(site)
             manifest = prepare_manifest(site, env={
                 "GITHUB_REPOSITORY": "owner/skynet", "GITHUB_RUN_ID": "101",
-                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "abc",
+                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "a" * 40,
             })
 
             def reader(url, *, headers):
@@ -103,11 +110,11 @@ class PagesPublicationTests(unittest.TestCase):
             self._site(new_site, stamp="2026-10-07T06:40:00+08:00")
             old = prepare_manifest(old_site, env={
                 "GITHUB_REPOSITORY": "owner/skynet", "GITHUB_RUN_ID": "101",
-                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "abc",
+                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "a" * 40,
             })
             prepare_manifest(new_site, env={
                 "GITHUB_REPOSITORY": "owner/skynet", "GITHUB_RUN_ID": "102",
-                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "abc",
+                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "a" * 40,
             })
 
             def reader(url, *, headers):
@@ -125,7 +132,7 @@ class PagesPublicationTests(unittest.TestCase):
             self._site(site)
             prepare_manifest(site, env={
                 "GITHUB_REPOSITORY": "owner/skynet", "GITHUB_RUN_ID": "101",
-                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "abc",
+                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "a" * 40,
             })
 
             def reader(url, *, headers):
