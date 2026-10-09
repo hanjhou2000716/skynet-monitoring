@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 from urllib.parse import unquote, urlsplit
 from unittest.mock import patch
 
-from pages_publication import PublicationError, _deploy, _oidc, _request_json, pages_build_version, prepare_manifest, verify_live
+from pages_publication import PublicationError, _deploy, _oidc, _request_json, main, pages_build_version, prepare_manifest, verify_live
 
 
 class _Clock:
@@ -145,6 +145,28 @@ class PagesPublicationTests(unittest.TestCase):
             with self.assertRaisesRegex(PublicationError, "PUBLICATION_NOT_VISIBLE"):
                 verify_live(site, "https://owner.github.io/skynet", reader=reader,
                             wait=clock.wait, clock=clock.now, max_wait=1)
+
+
+    def test_verify_live_cli_dispatches_to_independent_verifier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory) / "site"
+            self._site(site)
+            manifest = prepare_manifest(site, env={
+                "GITHUB_REPOSITORY": "owner/skynet", "GITHUB_RUN_ID": "101",
+                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "a" * 40,
+            })
+            summary = Path(directory) / "verification.json"
+            with patch("pages_publication.verify_live", return_value="VERIFIED") as verifier:
+                with patch.dict("os.environ", {"PUBLICATION_SUMMARY_PATH": str(summary)}, clear=False):
+                    result = main([
+                        "verify-live", str(site), "--base-url",
+                        "https://owner.github.io/skynet",
+                    ])
+            self.assertEqual(result, 0)
+            verifier.assert_called_once_with(str(site), "https://owner.github.io/skynet")
+            saved = json.loads(summary.read_text(encoding="utf-8"))
+            self.assertEqual(saved["status"], "VERIFIED")
+            self.assertEqual(saved["publicationId"], manifest["publicationId"])
 
 
 if __name__ == "__main__":
