@@ -335,6 +335,8 @@ class SkynetPipelineTests(unittest.TestCase):
         self.assertEqual(status["schemaVersion"], 2)
         self.assertEqual(status["service"]["windowDate"], "2026-09-29")
         self.assertEqual(status["service"]["commit"], "abc")
+        self.assertEqual(status["service"]["timeContractVersion"], 1)
+        self.assertEqual(status["service"]["windowDeadlineAt"], "2026-09-29T07:55:00+08:00")
         self.assertEqual(status["markets"]["taiwan"]["latestSessionDate"], "2026-09-29")
         self.assertRegex(status["generatedAt"], r"\+08:00$")
         self.assertEqual(data["dataQuality"]["staleAfterHours"], 18)

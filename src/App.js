@@ -30,6 +30,153 @@ const marketFresh = (market) => Boolean(
   market.latestSessionDate && market.latestSessionDate === market.expectedSessionDate
 );
 
+const parseInstant = (value) => {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : null;
+};
+
+const taipeiClock = (instant) => {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Taipei", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(new Date(instant)).reduce((result, part) => {
+    result[part.type] = part.value;
+    return result;
+  }, {});
+  return `${parts.hour}:${parts.minute}`;
+};
+
+const dateAfter = (isoDate, days) => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(isoDate || ""));
+  if (!match) return null;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + days));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+};
+
+const expectedSessionDeadline = (market, marketKey) => {
+  const supplied = parseInstant(market?.expectedSessionDeadlineAt);
+  if (supplied !== null) return supplied;
+  const sessionDate = market?.expectedSessionDate;
+  const deadlineDate = marketKey === "us" ? dateAfter(sessionDate, 1) : sessionDate;
+  if (!deadlineDate) return null;
+  return parseInstant(`${deadlineDate}T${marketKey === "us" ? "07:55:00" : "16:00:00"}+08:00`);
+};
+
+const nextUpdateDeadline = (market, marketKey) => {
+  const due = parseInstant(market?.nextDueAt);
+  if (due === null) return {
+    due: null, deadline: null,
+    invalid: Boolean(market?.nextDueAt || market?.nextUpdateDeadlineAt),
+  };
+  const buffer = (marketKey === "taiwan" && taipeiClock(due) === "14:30") ? 90 * 60 * 1000 :
+    (marketKey === "us" && taipeiClock(due) === "06:30") ? 85 * 60 * 1000 : null;
+  if (buffer === null) return { due, deadline: null, invalid: true };
+  const supplied = parseInstant(market?.nextUpdateDeadlineAt);
+  if (market?.nextUpdateDeadlineAt && supplied === null) return { due, deadline: null, invalid: true };
+  const deadline = supplied !== null ? supplied : due + buffer;
+  if (deadline !== due + buffer) {
+    return { due, deadline, invalid: true };
+  }
+  return { due, deadline, invalid: false };
+};
+
+const marketReadiness = (market, marketKey, now, requireTiming = false) => {
+  if (!market || typeof market !== "object") return { state: "degraded", reason: `${marketKey} 市場契約缺失` };
+  if (["unavailable", "calendar_unverified"].includes(market.status)) {
+    return { state: "degraded", reason: market.reasonCode || `${marketKey} 行情來源不可用` };
+  }
+  if (marketFresh(market)) {
+    if (requireTiming && (!market.nextDueAt || !market.nextUpdateDeadlineAt)) {
+      return { state: "degraded", reason: `${marketKey} 更新期限契約缺失` };
+    }
+    const timing = nextUpdateDeadline(market, marketKey);
+    if (timing.invalid) return { state: "degraded", reason: `${marketKey} 更新期限格式錯誤` };
+    if (timing.due !== null && now >= timing.due) {
+      if (now < timing.deadline) return { state: "waiting", deadline: timing.deadline, waitKind: "next_session" };
+      return { state: "degraded", reason: `${marketKey} 最新應有行情更新逾時` };
+    }
+    return { state: "ready" };
+  }
+  if (market.status === "stale" && ["SOURCE_LAGGING", "MARKET_DATA_STALE", "CACHE_STALE"].includes(market.reasonCode)) {
+    if (market.expectedSessionDeadlineAt && parseInstant(market.expectedSessionDeadlineAt) === null) {
+      return { state: "degraded", reason: `${marketKey} 應有行情期限格式錯誤` };
+    }
+    const deadline = expectedSessionDeadline(market, marketKey);
+    if (deadline !== null && now < deadline) return { state: "waiting", deadline, waitKind: "expected_session" };
+  }
+  return { state: "degraded", reason: market.reasonCode || `${marketKey} 行情日期不一致` };
+};
+
+const assessPayload = (json, now = Date.now()) => {
+  const markets = json.markets || {};
+  const marketStates = {
+    taiwan: marketReadiness(markets.taiwan, "taiwan", now, json.service?.timeContractVersion === 1),
+    us: marketReadiness(markets.us, "us", now, json.service?.timeContractVersion === 1),
+  };
+  const instruments = json.instruments && typeof json.instruments === "object"
+    ? Object.entries(json.instruments) : [];
+  const problems = [];
+  const transientInstrument = (instrument, marketKey) => {
+    const reason = instrument?.reasonCode;
+    if (marketStates[marketKey]?.state !== "waiting" || instrument?.status !== "stale" ||
+        !["SOURCE_LAGGING", "MARKET_DATA_STALE", "CACHE_STALE"].includes(reason)) return false;
+    const results = instrument.sourceResults && Object.values(instrument.sourceResults);
+    if (Array.isArray(results) && results.length) {
+      return results.every((result) => result?.status === "AVAILABLE") &&
+        results.some((result) => result?.latestSessionDate);
+    }
+    return Boolean(instrument.selectedSource);
+  };
+  for (const [symbol, instrument] of instruments) {
+    if (!instrument || !["fresh", "market_closed"].includes(instrument.status) ||
+        instrument.latestSessionDate !== instrument.expectedSessionDate) {
+      const marketKey = ["^TWII", "006208"].includes(symbol) ? "taiwan" : "us";
+      if (transientInstrument(instrument, marketKey)) continue;
+      const details = instrument || {};
+      problems.push(`${symbol} 實際 ${details.latestSessionDate || "—"}，應有 ${details.expectedSessionDate || "—"}（${details.reasonCode || "SOURCE_UNAVAILABLE"}）`);
+    }
+  }
+  for (const [marketKey, result] of Object.entries(marketStates)) {
+    if (result.state !== "waiting" || result.waitKind !== "expected_session") continue;
+    const hasLagEvidence = instruments.some(([symbol, instrument]) => {
+      const belongs = marketKey === "taiwan"
+        ? ["^TWII", "006208"].includes(symbol)
+        : symbol.toUpperCase().includes("VIX");
+      return belongs && transientInstrument(instrument, marketKey);
+    });
+    if (!hasLagEvidence) problems.push(`${marketKey} 缺少可驗證的來源落後證據`);
+  }
+  for (const [marketKey, result] of Object.entries(marketStates)) {
+    if (result.state === "degraded") problems.push(result.reason);
+  }
+
+  const sources = json.dataQuality?.sources || {};
+  for (const key of ["taiex", "vix", "006208"]) {
+    if (sources[key] === "ok") continue;
+    const marketKey = key === "vix" ? "us" : "taiwan";
+    if (sources[key] === "stale" && marketStates[marketKey]?.state === "waiting") continue;
+    problems.push(`${key} 行情來源狀態 ${sources[key] || "缺失"}`);
+  }
+  const values = [json.taiex, json.ma200, json.daysBelowMa, json.vix,
+    json.daysVixAbove20, json.peak_006208, json.asset_006208].map(finiteMetric);
+  if (values.some((value) => value === null)) problems.push("計算所需資料不足");
+  if (json.schemaVersion !== 2) problems.push("資料契約版本待確認");
+  if (json.calendar?.status !== "verified") problems.push("交易日曆待確認");
+  if (json.service?.status !== "ok") problems.push("Skynet 服務執行狀態待確認");
+  const waits = Object.values(marketStates).filter((item) => item.state === "waiting");
+  if (json.status !== "ok" && waits.length === 0 && problems.length === 0) problems.push("資料健康狀態待確認");
+  if (problems.length) return { state: "degraded", error: Array.from(new Set(problems)).join("\n") };
+  if (waits.length) {
+    const deadline = Math.min(...waits.map((item) => item.deadline));
+    const label = new Intl.DateTimeFormat("zh-TW", {
+      timeZone: "Asia/Taipei", hour: "2-digit", minute: "2-digit", hour12: false,
+    }).format(new Date(deadline));
+    return { state: "waiting", error: `等待本次更新，完成期限 ${label}（台灣時間）。此期間停用安全結論與操作建議。` };
+  }
+  if (json.status !== "ok") return { state: "degraded", error: "資料健康狀態待確認" };
+  return { state: "ready", error: "" };
+};
+
 const App = () => {
   const [isLoaded, setIsLoaded] = useState(false);
   const [isFetching, setIsFetching] = useState(false);
@@ -48,6 +195,7 @@ const App = () => {
   const [marketMeta, setMarketMeta] = useState({ taiwan: {}, us: {}, instruments: {} });
   const [dataState, setDataState] = useState("loading");
   const [dataError, setDataError] = useState("");
+  const [dataPayload, setDataPayload] = useState(null);
 
   const fetchLatestData = () => {
     setIsFetching(true);
@@ -128,6 +276,10 @@ const App = () => {
         if (!sourceValuesOkay) causes.push("必要行情來源不完整");
         if (!valuesOkay) causes.push("計算所需資料不足");
         setDataError(healthy ? "" : Array.from(new Set(causes)).join("\n") || "資料契約版本待確認，暫停操作建議。");
+        setDataPayload(json);
+        const assessment = assessPayload(json);
+        setDataState(assessment.state);
+        setDataError(assessment.error);
         setIsFetching(false);
       })
       .catch(err => {
@@ -141,6 +293,18 @@ const App = () => {
   useEffect(() => {
     fetchLatestData();
   }, []);
+
+  useEffect(() => {
+    if (!dataPayload) return undefined;
+    const reassess = () => {
+      const assessment = assessPayload(dataPayload);
+      setDataState(assessment.state);
+      setDataError(assessment.error);
+    };
+    reassess();
+    const timer = window.setInterval(reassess, 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, [dataPayload]);
 
   useEffect(() => {
     if (Number.isFinite(taiex) && Number.isFinite(ma200) && taiex >= ma200) setDaysBelowMa(0);
@@ -218,7 +382,7 @@ const App = () => {
                 COMPLETED MARKET DATA
               </span>
               <strong className={`font-mono ${dataState !== "ready" ? "text-amber-400" : ""}`}>
-                {dataState === "degraded" ? "資料待確認" : "Data Sync"}: {lastUpdated || "—"}
+                {dataState === "waiting" ? "等待本次更新" : dataState === "degraded" ? "資料待確認" : "Data Sync"}: {lastUpdated || "—"}
               </strong>
             </div>
             <button
@@ -256,7 +420,7 @@ const App = () => {
                   dataState !== "ready" ? "text-amber-300" : isProtocolTriggered ? "text-red-400" : "text-emerald-400"
                 }`}
               >
-                {dataState !== "ready" ? "資料待確認" : isProtocolTriggered
+                {dataState === "waiting" ? "等待本次更新" : dataState !== "ready" ? "資料待確認" : isProtocolTriggered
                   ? "PROTOCOL ACTIVATED: 無情退場協議啟動"
                   : "SYSTEM SAFE: 監控系統安全"}
               </h2>
