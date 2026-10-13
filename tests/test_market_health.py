@@ -153,7 +153,7 @@ class MarketCalendarTests(unittest.TestCase):
     def test_cboe_calendar_skips_current_metadata_preamble(self):
         response = (
             '# Generated: 2026:09:30 00:00:47\\n#\\n'
-            '# Start CSV parsing at the line after the "##".\\n#\\n##\r\n'
+            '# Start CSV parsing at the line after the "##".\\n#\\n##\n'
             + CBOE_FIXTURE
         )
         parsed = parse_cboe_calendar(response)
@@ -189,6 +189,19 @@ class MarketCalendarTests(unittest.TestCase):
         )
         self.assertEqual(value["status"], "stale")
         self.assertEqual(value["reasonCode"], "MARKET_DATA_STALE")
+        self.assertEqual(value["expectedSessionAvailableAt"], "2026-09-29T14:30:00+08:00")
+        self.assertEqual(value["expectedSessionDeadlineAt"], "2026-09-29T16:00:00+08:00")
+        self.assertEqual(value["nextUpdateDeadlineAt"], "2026-09-29T16:00:00+08:00")
+
+    def test_market_contract_distinguishes_us_data_availability_from_completion(self):
+        value = market_contract(
+            dt.date(2026, 10, 12), dt.date(2026, 10, 12),
+            dt.datetime(2026, 10, 14, 6, 30, tzinfo=TAIPEI), True, market="us",
+        )
+        self.assertEqual(value["status"], "fresh")
+        self.assertEqual(value["expectedSessionAvailableAt"], "2026-10-13T06:30:00+08:00")
+        self.assertEqual(value["expectedSessionDeadlineAt"], "2026-10-13T07:55:00+08:00")
+        self.assertEqual(value["nextUpdateDeadlineAt"], "2026-10-14T07:55:00+08:00")
 
     def test_cached_calendar_is_used_only_inside_24_hour_window(self):
         now = dt.datetime(2026, 9, 29, 7, 0, tzinfo=TAIPEI)

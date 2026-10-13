@@ -612,13 +612,15 @@ def market_snapshot(now=None, cache_dir=".calendar-cache", history_cache_dir=".m
             ) else None
             markets["taiwan"] = market_contract(
                 tw_latest, expected_tw, taiwan_next_due(now, expected_tw, calendars["twse"]),
-                now.date().weekday() < 5 and now.date().isoformat() not in calendars["twse"]["closedDates"], tw_reason,
+                now.date().weekday() < 5 and now.date().isoformat() not in calendars["twse"]["closedDates"],
+                tw_reason, market="taiwan",
             )
             us_reason = None if sources["vix"] == "ok" else instruments.get("^VIX", {}).get("reasonCode", "SOURCE_UNAVAILABLE")
             ny_today = now.astimezone(NEW_YORK).date()
             markets["us"] = market_contract(
                 us_latest, expected_us, us_next_due(expected_us, calendars["cboe"]),
-                ny_today.weekday() < 5 and ny_today.isoformat() not in calendars["cboe"]["closedDates"], us_reason,
+                ny_today.weekday() < 5 and ny_today.isoformat() not in calendars["cboe"]["closedDates"],
+                us_reason, market="us",
             )
         except CalendarUnavailable:
             calendar_contract = {"status": "unavailable", "reasonCode": "CALENDAR_UNVERIFIED"}
@@ -645,9 +647,21 @@ def main():
     )
     window_date = os.getenv("TARGET_WINDOW_DATE") or now.date().isoformat()
     generated_at = now.isoformat()
+    if window == "morning":
+        window_deadline = datetime.datetime.combine(
+            datetime.date.fromisoformat(window_date), datetime.time(7, 55), TAIPEI,
+        )
+    elif window == "afternoon":
+        window_deadline = datetime.datetime.combine(
+            datetime.date.fromisoformat(window_date), datetime.time(16, 0), TAIPEI,
+        )
+    else:
+        window_deadline = None
     service = {
         "status": "ok", "generatedAt": generated_at,
         "windowDate": window_date, "window": window,
+        "timeContractVersion": 1,
+        "windowDeadlineAt": window_deadline.isoformat() if window_deadline else None,
         "commit": os.getenv("GITHUB_SHA", "local"),
         "runId": os.getenv("GITHUB_RUN_ID", "local"),
         "dataStatus": status,

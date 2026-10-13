@@ -134,7 +134,7 @@ def parse_cboe_calendar(body):
         marker = body.rfind("##")
         if marker < 0:
             raise ValueError("Cboe calendar metadata delimiter is missing")
-        normalized = body[marker + 2:].lstrip("\r\n")
+        normalized = body[marker + 2:].lstrip("\n")
     reader = csv.DictReader(io.StringIO(normalized))
     required = {"Holiday Name", "Date", "Regular Trading Hours"}
     if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
@@ -495,12 +495,39 @@ def us_next_due(expected, calendar):
     return dt.datetime.combine(session + dt.timedelta(days=1), dt.time(6, 30), TAIPEI)
 
 
-def market_contract(latest, expected, next_due, market_open_today, reason=None):
+def _market_time_fields(expected, next_due, market):
+    """Keep data availability separate from the time by which publication must finish."""
+    if market == "taiwan":
+        available_time = dt.time(14, 30)
+        completion_buffer = dt.timedelta(minutes=90)
+    elif market == "us":
+        available_time = dt.time(6, 30)
+        completion_buffer = dt.timedelta(minutes=85)
+    else:
+        raise ValueError(f"unknown market time contract: {market}")
+
+    expected_available = None
+    expected_deadline = None
+    if expected is not None:
+        available_date = expected + dt.timedelta(days=1 if market == "us" else 0)
+        expected_available = dt.datetime.combine(available_date, available_time, TAIPEI)
+        expected_deadline = expected_available + completion_buffer
+    next_deadline = next_due + completion_buffer if next_due else None
+    return {
+        "expectedSessionAvailableAt": expected_available.isoformat() if expected_available else None,
+        "expectedSessionDeadlineAt": expected_deadline.isoformat() if expected_deadline else None,
+        "nextDueAt": next_due.isoformat() if next_due else None,
+        "nextUpdateDeadlineAt": next_deadline.isoformat() if next_deadline else None,
+    }
+
+
+def market_contract(latest, expected, next_due, market_open_today, reason=None, market="taiwan"):
+    timing = _market_time_fields(expected, next_due, market)
     if reason:
         return {
             "status": "unavailable", "latestSessionDate": latest.isoformat() if latest else None,
             "expectedSessionDate": expected.isoformat() if expected else None,
-            "nextDueAt": next_due.isoformat() if next_due else None, "reasonCode": reason,
+            **timing, "reasonCode": reason,
         }
     latest_text = latest.isoformat() if latest else None
     expected_text = expected.isoformat() if expected else None
@@ -508,13 +535,13 @@ def market_contract(latest, expected, next_due, market_open_today, reason=None):
         return {
             "status": "stale", "latestSessionDate": latest_text,
             "expectedSessionDate": expected_text,
-            "nextDueAt": next_due.isoformat() if next_due else None,
+            **timing,
             "reasonCode": "MARKET_DATA_STALE",
         }
     return {
         "status": "fresh" if market_open_today else "market_closed",
         "latestSessionDate": latest_text, "expectedSessionDate": expected_text,
-        "nextDueAt": next_due.isoformat() if next_due else None,
+        **timing,
         "reasonCode": "OK" if market_open_today else "OFFICIAL_MARKET_CLOSED",
     }
 
