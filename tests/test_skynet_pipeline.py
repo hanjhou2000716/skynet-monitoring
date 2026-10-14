@@ -77,6 +77,24 @@ class SkynetPipelineTests(unittest.TestCase):
         self.assertEqual(instruments["^TWII"]["latestSessionDate"], "2026-09-24")
         self.assertEqual(instruments["006208"]["latestSessionDate"], "2026-09-24")
 
+    def test_taiwan_market_aggregation_normalizes_pandas_timestamps(self):
+        import pandas as pd
+
+        def timestamp_resolver(symbol, period, timezone, expected, months, cache_dir):
+            frame, instrument = self._history_resolver(symbol, period, timezone, expected, months, cache_dir)
+            frame.index = pd.DatetimeIndex(frame.index)
+            return frame, instrument
+
+        now = dt.datetime(2026, 9, 29, 13, 0, tzinfo=TAIPEI)
+        with patch("tg_bot_optimized.load_calendars", return_value=self._calendars()):
+            _, sources, markets, _, instruments = market_snapshot(
+                now, history_resolver=timestamp_resolver
+            )
+        self.assertEqual(markets["taiwan"]["status"], "fresh")
+        self.assertEqual(markets["taiwan"]["latestSessionDate"], "2026-09-24")
+        self.assertTrue(all(value == "ok" for value in sources.values()))
+        self.assertEqual(instruments["006208"]["latestSessionDate"], "2026-09-24")
+
     def test_after_close_includes_current_day_only_when_present(self):
         frames = self._frames()
         now = dt.datetime(2026, 9, 29, 14, 30, tzinfo=TAIPEI)
