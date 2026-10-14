@@ -572,7 +572,6 @@ def market_snapshot(now=None, cache_dir=".calendar-cache", history_cache_dir=".m
             raise ValueError("completed 006208 history unavailable")
         values["peak_006208"] = round(float(fund["High"].max()), 2)
         values["asset_006208"] = round(float(fund["Close"].iloc[-1]), 2)
-        fund_latest = fund.index[-1]
         fund_latest = _session_day(fund.index[-1])
         taiwan_latest.append(fund_latest)
         if not has_complete_range(
@@ -606,7 +605,7 @@ def market_snapshot(now=None, cache_dir=".calendar-cache", history_cache_dir=".m
                          "reasonCode": "CALENDAR_UNVERIFIED"}
     else:
         try:
-            tw_latest = min(taiwan_latest) if len(taiwan_latest) == 2 else (taiwan_latest[0] if taiwan_latest else None)
+            tw_latest = min((_session_day(value) for value in taiwan_latest), default=None)
             tw_reason = "SOURCE_CONFLICT" if any(
                 instruments.get(key, {}).get("reasonCode") == "SOURCE_CONFLICT"
                 for key in ("^TWII", "006208")
