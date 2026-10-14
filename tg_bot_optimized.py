@@ -473,7 +473,7 @@ def market_snapshot(now=None, cache_dir=".calendar-cache", history_cache_dir=".m
             raise MarketDataError("HISTORY_SESSION_GAP", instruments.get("^TWII", {}).get("sourceAttempts", 0))
         close = taiex_history["Close"].astype(float)
         values["taiex"] = round(float(close.iloc[-1]), 2)
-        taiwan_latest.append(taiex_history.index[-1])
+        taiwan_latest.append(_session_day(taiex_history.index[-1]))
         if (len(taiex_history) < 200 or not has_complete_sessions(
                 taiex_history, expected_tw, calendars["twse"], 200,
                 reference_sessions=taiwan_reference_sessions,
@@ -573,6 +573,7 @@ def market_snapshot(now=None, cache_dir=".calendar-cache", history_cache_dir=".m
         values["peak_006208"] = round(float(fund["High"].max()), 2)
         values["asset_006208"] = round(float(fund["Close"].iloc[-1]), 2)
         fund_latest = fund.index[-1]
+        fund_latest = _session_day(fund.index[-1])
         taiwan_latest.append(fund_latest)
         if not has_complete_range(
                 fund, fund_start, expected_tw, calendars["twse"],
