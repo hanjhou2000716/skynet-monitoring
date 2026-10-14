@@ -160,6 +160,15 @@ class MarketCalendarTests(unittest.TestCase):
         self.assertEqual(parsed["years"], [2026])
         self.assertEqual(parsed["closedDates"], ["2026-01-01", "2026-04-03"])
 
+    def test_cboe_calendar_accepts_live_crlf_metadata_delimiter(self):
+        response = (
+            '# Generated: 2026:10:14 00:00:50\r\n#\r\n'
+            '# Start CSV parsing at the line after the "##".\r\n#\r\n##\r\n'
+            + CBOE_FIXTURE.replace("\n", "\r\n")
+        )
+        parsed = parse_cboe_calendar(response)
+        self.assertEqual(parsed["years"], [2026])
+        self.assertEqual(parsed["closedDates"], ["2026-01-01", "2026-04-03"])
     def test_four_day_taiwan_closure_expected_session_and_next_deadline(self):
         calendar = {"closedDates": ["2026-09-25", "2026-09-28"], "years": [2026]}
         before_cutoff = dt.datetime(2026, 9, 29, 13, 59, tzinfo=TAIPEI)

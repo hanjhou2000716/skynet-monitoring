@@ -134,7 +134,9 @@ def parse_cboe_calendar(body):
         marker = body.rfind("##")
         if marker < 0:
             raise ValueError("Cboe calendar metadata delimiter is missing")
-        normalized = body[marker + 2:].lstrip("\n")
+        # The live Cboe feed uses CRLF after the ``##`` delimiter. Strip all
+        # leading whitespace so the first CSV header is not prefixed by ``\r``.
+        normalized = body[marker + 2:].lstrip()
     reader = csv.DictReader(io.StringIO(normalized))
     required = {"Holiday Name", "Date", "Regular Trading Hours"}
     if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
