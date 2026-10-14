@@ -87,7 +87,7 @@ class SkynetPipelineTests(unittest.TestCase):
 
         frames = self._frames()
         now = dt.datetime(2026, 9, 29, 13, 0, tzinfo=TAIPEI)
-        with patch("tg_bot_optimized.load_calendars", return_value=self._calendars()), \\
+        with patch("tg_bot_optimized.load_calendars", return_value=self._calendars()), \
              patch("tg_bot_optimized.yf.Ticker", side_effect=lambda symbol: FakeTicker(symbol, frames)):
             _, sources, markets, _, instruments = market_snapshot(
                 now, history_resolver=timestamp_resolver
